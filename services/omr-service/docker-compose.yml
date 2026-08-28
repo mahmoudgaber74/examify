@@ -1,0 +1,43 @@
+services:
+  omr-service:
+    build: .
+    environment:
+      OMR_SERVICE_TOKEN: ${OMR_SERVICE_TOKEN:-local-omr-development-token}
+      OMR_MAX_REQUEST_BYTES: ${OMR_MAX_REQUEST_BYTES:-26214400}
+      OMR_MAX_PAGES: ${OMR_MAX_PAGES:-20}
+      OMR_PDF_DPI: ${OMR_PDF_DPI:-300}
+    ports:
+      - "127.0.0.1:18080:8080"
+    networks:
+      - supabase_local
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+
+  omr-worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL:-http://kong:8000}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?Set local Supabase service role key}
+      OMR_SERVICE_URL: ${OMR_SERVICE_URL:-http://omr-service:8080}
+      OMR_SERVICE_TOKEN: ${OMR_SERVICE_TOKEN:-local-omr-development-token}
+      OMR_WORKER_ID: ${OMR_WORKER_ID:-omr-worker-1}
+      OMR_WORKER_CONCURRENCY: ${OMR_WORKER_CONCURRENCY:-2}
+      OMR_WORKER_POLL_SECONDS: ${OMR_WORKER_POLL_SECONDS:-2}
+    networks:
+      - supabase_local
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  supabase_local:
+    external: true
+    name: supabase_network_project
