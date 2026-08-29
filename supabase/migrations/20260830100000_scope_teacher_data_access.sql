@@ -1,6 +1,22 @@
 -- Scope teacher reads and grading access to active subject/class assignments.
 -- Administrative roles and student/parent ownership rules remain unchanged.
 
+-- Keep this migration safe to run from the Dashboard SQL Editor even when
+-- the earlier teacher-authorization migration has not been applied yet.
+CREATE OR REPLACE FUNCTION public.current_staff_profile_id()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT sp.id
+  FROM public.staff_profiles sp
+  WHERE sp.user_id = auth.uid()
+    AND sp.is_active = true
+  LIMIT 1;
+$$;
+
 CREATE OR REPLACE FUNCTION public.teacher_has_class_scope(
   p_class_id uuid,
   p_section_id uuid DEFAULT NULL
