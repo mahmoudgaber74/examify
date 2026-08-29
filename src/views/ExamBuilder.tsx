@@ -112,8 +112,29 @@ export function ExamBuilder() {
     }
     setSubjects(visibleSubjects);
     setClasses(visibleClasses);
-    if (sectionRes.data) setSections(sectionRes.data as SectionRow[]);
-    if (gradeSubjectRes.data) setGradeSubjects(gradeSubjectRes.data as GradeSubjectRow[]);
+    const allSections = (sectionRes.data as SectionRow[]) ?? [];
+    const visibleClassIds = new Set(visibleClasses.map((item) => item.id));
+    const visibleSectionIds = new Set(
+      assignments
+        .filter((item) => item.section_id)
+        .map((item) => item.section_id as string),
+    );
+    setSections(allSections.filter((section) => {
+      if (!visibleClassIds.has(section.class_id)) return false;
+      if (role !== 'teacher') return true;
+      return assignments.some((assignment) =>
+        assignment.class_id === section.class_id
+        && assignment.is_active
+        && (!assignment.section_id || visibleSectionIds.has(section.id)),
+      );
+    }));
+    if (gradeSubjectRes.data) {
+      const gradeSubjectRows = gradeSubjectRes.data as GradeSubjectRow[];
+      setGradeSubjects(role === 'teacher'
+        ? gradeSubjectRows.filter((row) => visibleSubjects.some((subject) => subject.id === row.subject_id)
+          && (!row.class_id || visibleClassIds.has(row.class_id)))
+        : gradeSubjectRows);
+    }
     setTeacherAssignments(assignments);
   }, [institutionId, role, user]);
 
