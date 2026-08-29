@@ -300,7 +300,9 @@ CREATE POLICY answers_select ON public.answers FOR SELECT TO authenticated USING
   OR EXISTS (
     SELECT 1 FROM public.exam_attempts ea
     JOIN public.student_profiles sp ON sp.id = ea.student_id
-    WHERE ea.id = answers.attempt_id AND sp.user_id = auth.uid()
+    WHERE ea.id = answers.attempt_id
+      AND sp.user_id = auth.uid()
+      AND (ea.status = 'in_progress' OR ea.is_result_published = true)
   )
 );
 
