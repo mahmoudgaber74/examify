@@ -1,7 +1,11 @@
 import mammoth from 'mammoth/mammoth.browser';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/legacy/build/pdf.worker.mjs', import.meta.url).toString();
+// Let Vite copy the worker into the final assets folder. Using a package URL
+// directly leaves `/node_modules/...` in development and causes PDF.js to fall
+// back to a fake worker that fails in the browser.
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 export interface ImportedQuestion {
   prompt: string;
