@@ -1,243 +1,114 @@
-import { useState, useEffect } from 'react';
-import { Card, Badge, SectionHeader, ProgressBar, Sparkline } from '../components/ui';
-import { BRANCHES, STUDENTS } from '../lib/data';
-import { supabase } from '../lib/supabase';
-import {
-  BarChart3, TrendingUp, Users, GraduationCap, DollarSign, AlertTriangle,
-  Download, Filter, ArrowUpRight, ArrowDownRight, Activity, Target,
-} from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AlertCircle, BarChart3, Download, Loader2, Target, Users } from 'lucide-react';
+import { Card, Badge, EmptyState, ProgressBar, SectionHeader } from '../components/ui';
+import { supabase, useAuthSafe } from '../lib/auth-helpers';
 
-const DASHBOARDS = ['تنفيذي', 'فرعي', 'إداري', 'معلّم', 'طالب', 'ذكاء'];
-const TIME_RANGES = ['30 يوم', '90 يوم', 'سنة', 'الكل'];
+type Student = { id: string; full_name: string; is_active: boolean };
+type Subject = { id: string; name: string };
+type Exam = { id: string; title: string; subject_id: string | null; class_id: string | null; status: string; created_at: string };
+type Attempt = { id: string; exam_id: string; student_id: string; score_percentage: number | null; is_passed: boolean | null; status: string; submitted_at: string | null; created_at: string };
+type Attendance = { student_id: string; status: string; date: string };
+type Grade = { student_id: string; subject_id: string; score: number; max_score: number; recorded_at: string };
+type ClassStudent = { student_id: string; class_id: string; status: string };
+type ClassRow = { id: string; name: string; branch_id: string | null };
+type Branch = { id: string; name: string };
+type AnalyticsData = { students: Student[]; subjects: Subject[]; exams: Exam[]; attempts: Attempt[]; attendance: Attendance[]; grades: Grade[]; classStudents: ClassStudent[]; classes: ClassRow[]; branches: Branch[] };
 
-const PERFORMANCE_DATA = [
-  { month: 'يناير', pass: 82, attendance: 91, engagement: 78 },
-  { month: 'فبراير', pass: 83, attendance: 92, engagement: 80 },
-  { month: 'مارس', pass: 84, attendance: 90, engagement: 82 },
-  { month: 'أبريل', pass: 85, attendance: 93, engagement: 84 },
-  { month: 'مايو', pass: 86, attendance: 92, engagement: 86 },
-  { month: 'يونيو', pass: 87, attendance: 94, engagement: 88 },
-];
+const EMPTY: AnalyticsData = { students: [], subjects: [], exams: [], attempts: [], attendance: [], grades: [], classStudents: [], classes: [], branches: [] };
+const ranges = [{ value: '30', label: '30 يوم' }, { value: '90', label: '90 يوم' }, { value: '365', label: 'سنة' }, { value: 'all', label: 'الكل' }];
 
-const SUBJECT_PERFORMANCE = [
-  { subject: 'الرياضيات', score: 84, change: 3.2 },
-  { subject: 'علوم الحاسب', score: 91, change: 5.1 },
-  { subject: 'العلوم', score: 78, change: -1.4 },
-  { subject: 'اللغات', score: 86, change: 2.8 },
-  { subject: 'العلوم الإنسانية', score: 82, change: 1.1 },
-  { subject: 'إدارة الأعمال', score: 79, change: -0.8 },
-];
-
-const RISK_FACTORS = [
-  { factor: 'انخفاض الحضور', count: 4820, pct: 38 },
-  { factor: 'تأخّر تسليم الواجبات', count: 3210, pct: 26 },
-  { factor: 'انخفاض درجة التفاعل', count: 2480, pct: 20 },
-  { factor: 'رسوب في التقييمات', count: 1898, pct: 16 },
-];
+function sinceDate(range: string) { if (range === 'all') return null; const date = new Date(); date.setDate(date.getDate() - Number(range)); return date; }
+function inRange(value: string | null, start: Date | null) { return !start || (value ? new Date(value) >= start : false); }
+function average(values: number[]) { return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0; }
 
 export function Analytics() {
-  const [dash, setDash] = useState('تنفيذي');
-  const [timeRange, setTimeRange] = useState('30 يوم');
-  const [dbStats, setDbStats] = useState({ students: 0, exams: 0, avgScore: 0 });
+  const { institutionId } = useAuthSafe();
+  const [range, setRange] = useState('30');
+  const [data, setData] = useState<AnalyticsData>(EMPTY);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const exportAnalytics = () => {
-    const rows = [
-      ['المؤشر', 'القيمة'],
-      ['الطلاب', String(dbStats.students)],
-      ['الامتحانات', String(dbStats.exams)],
-      ['متوسط الدرجة', `${dbStats.avgScore}%`],
-      ['الفترة', timeRange],
-    ];
+  const load = useCallback(async () => {
+    if (!institutionId) return;
+    setLoading(true); setError(null);
+    const [studentRes, subjectRes, examRes, attendanceRes, gradeRes, classStudentRes, classRes, branchRes] = await Promise.all([
+      supabase.from('student_profiles').select('id, full_name, is_active').eq('institution_id', institutionId).order('full_name'),
+      supabase.from('subjects').select('id, name').eq('institution_id', institutionId).order('name'),
+      supabase.from('examify_exams').select('id, title, subject_id, class_id, status, created_at').eq('institution_id', institutionId).order('created_at', { ascending: false }),
+      supabase.from('attendance').select('student_id, status, date').eq('institution_id', institutionId),
+      supabase.from('grade_book').select('student_id, subject_id, score, max_score, recorded_at').eq('institution_id', institutionId),
+      supabase.from('class_students').select('student_id, class_id, status').eq('status', 'active'),
+      supabase.from('classes').select('id, name, branch_id').eq('institution_id', institutionId),
+      supabase.from('branches').select('id, name').eq('institution_id', institutionId),
+    ]);
+    const firstError = [studentRes, subjectRes, examRes, attendanceRes, gradeRes, classStudentRes, classRes, branchRes].find((result) => result.error)?.error;
+    if (firstError) { setError(firstError.message); setLoading(false); return; }
+    const exams = (examRes.data as Exam[]) ?? [];
+    let attempts: Attempt[] = [];
+    if (exams.length) {
+      const attemptRes = await supabase.from('exam_attempts').select('id, exam_id, student_id, score_percentage, is_passed, status, submitted_at, created_at').in('exam_id', exams.map((exam) => exam.id));
+      if (attemptRes.error) { setError(attemptRes.error.message); setLoading(false); return; }
+      attempts = (attemptRes.data as Attempt[]) ?? [];
+    }
+    setData({ students: (studentRes.data as Student[]) ?? [], subjects: (subjectRes.data as Subject[]) ?? [], exams, attempts, attendance: (attendanceRes.data as Attendance[]) ?? [], grades: (gradeRes.data as Grade[]) ?? [], classStudents: (classStudentRes.data as ClassStudent[]) ?? [], classes: (classRes.data as ClassRow[]) ?? [], branches: (branchRes.data as Branch[]) ?? [] });
+    setLoading(false);
+  }, [institutionId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const metrics = useMemo(() => {
+    const start = sinceDate(range);
+    const exams = data.exams.filter((exam) => inRange(exam.created_at, start));
+    const attempts = data.attempts.filter((attempt) => inRange(attempt.submitted_at ?? attempt.created_at, start));
+    const scored = attempts.filter((attempt) => attempt.score_percentage !== null);
+    const attendance = data.attendance.filter((row) => inRange(row.date, start));
+    const grades = data.grades.filter((row) => inRange(row.recorded_at, start));
+    const subjectNames = new Map(data.subjects.map((subject) => [subject.id, subject.name]));
+    const examMap = new Map(data.exams.map((exam) => [exam.id, exam]));
+    const classMap = new Map(data.classes.map((row) => [row.id, row]));
+    const subjectScores = new Map<string, number[]>();
+    const branchScores = new Map<string, number[]>();
+    const studentScores = new Map<string, number[]>();
+    for (const attempt of scored) {
+      const exam = examMap.get(attempt.exam_id);
+      if (exam?.subject_id) subjectScores.set(exam.subject_id, [...(subjectScores.get(exam.subject_id) ?? []), Number(attempt.score_percentage)]);
+      const branchId = exam?.class_id ? classMap.get(exam.class_id)?.branch_id : null;
+      if (branchId) branchScores.set(branchId, [...(branchScores.get(branchId) ?? []), Number(attempt.score_percentage)]);
+      studentScores.set(attempt.student_id, [...(studentScores.get(attempt.student_id) ?? []), Number(attempt.score_percentage)]);
+    }
+    const subjectPerformance = Array.from(subjectScores.entries()).map(([id, scores]) => ({ name: subjectNames.get(id) ?? 'بدون مادة', score: average(scores), count: scores.length })).sort((a, b) => b.score - a.score);
+    const branchPerformance = data.branches.map((branch) => ({ name: branch.name, score: average(branchScores.get(branch.id) ?? []), count: branchScores.get(branch.id)?.length ?? 0 })).filter((row) => row.count > 0).sort((a, b) => b.score - a.score);
+    const topStudents = Array.from(studentScores.entries()).map(([id, scores]) => ({ name: data.students.find((student) => student.id === id)?.full_name ?? 'طالب', score: average(scores), count: scores.length })).sort((a, b) => b.score - a.score).slice(0, 6);
+    const absence = new Map<string, { total: number; absent: number }>();
+    for (const row of attendance) { const current = absence.get(row.student_id) ?? { total: 0, absent: 0 }; current.total += 1; if (row.status === 'absent') current.absent += 1; absence.set(row.student_id, current); }
+    const riskStudents = data.students.map((student) => { const row = absence.get(student.id); const score = average(studentScores.get(student.id) ?? []); const absenceRate = row?.total ? row.absent / row.total : 0; return { name: student.full_name, score, risk: (score > 0 && score < 50) || absenceRate >= 0.3 }; }).filter((student) => student.risk).slice(0, 6);
+    const attendanceRate = attendance.length ? (attendance.filter((row) => row.status === 'present' || row.status === 'late').length / attendance.length) * 100 : 0;
+    return { exams, attempts, scored, attendance, grades, subjectPerformance, branchPerformance, topStudents, riskStudents, attendanceRate, avgScore: average(scored.map((attempt) => Number(attempt.score_percentage))), passRate: scored.length ? (scored.filter((attempt) => attempt.is_passed === true).length / scored.length) * 100 : 0 };
+  }, [data, range]);
+
+  function exportAnalytics() {
+    const rows = [['المؤشر', 'القيمة'], ['الطلاب النشطون', String(data.students.filter((student) => student.is_active).length)], ['الامتحانات', String(metrics.exams.length)], ['المحاولات', String(metrics.attempts.length)], ['متوسط الدرجات', `${metrics.avgScore.toFixed(1)}%`], ['نسبة النجاح', `${metrics.passRate.toFixed(1)}%`], ['نسبة الحضور', `${metrics.attendanceRate.toFixed(1)}%`]];
     const csv = rows.map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n');
-    const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'examify-analytics.csv';
-    link.click();
-    URL.revokeObjectURL(url);
-  };
+    const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' })); const link = document.createElement('a'); link.href = url; link.download = 'examify-analytics.csv'; link.click(); URL.revokeObjectURL(url);
+  }
 
-  useEffect(() => {
-    Promise.all([
-      supabase.from('students').select('*', { count: 'exact', head: true }),
-      supabase.from('exams').select('avg_score'),
-    ]).then(([s, e]) => {
-      const scores = (e.data ?? []).filter((r: any) => r.avg_score !== null).map((r: any) => r.avg_score);
-      const avg = scores.length > 0 ? scores.reduce((a: number, b: number) => a + b, 0) / scores.length : 0;
-      setDbStats({ students: s.count ?? 0, exams: e.data?.length ?? 0, avgScore: Math.round(avg * 10) / 10 });
-    });
-  }, [timeRange]);
-
-  return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-1 p-1 bg-white rounded-xl border border-ink-100">
-          {DASHBOARDS.map((d) => (
-            <button key={d} onClick={() => setDash(d)} className={`px-3.5 py-1.5 rounded-lg text-sm font-600 transition ${dash === d ? 'bg-brand-600 text-white' : 'text-ink-600 hover:bg-ink-100'}`}>{d}</button>
-          ))}
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 p-1 bg-white rounded-xl border border-ink-100">
-            {TIME_RANGES.map((t) => (
-              <button key={t} onClick={() => setTimeRange(t)} className={`px-3 py-1.5 rounded-lg text-xs font-600 transition ${timeRange === t ? 'bg-brand-600 text-white' : 'text-ink-600 hover:bg-ink-100'}`}>{t}</button>
-            ))}
-          </div>
-          <button onClick={() => window.alert(`الفلاتر الحالية: ${dash} — ${timeRange}`)} className="btn-outline"><Filter size={15} /> مرشّحات</button>
-          <button onClick={exportAnalytics} className="btn-outline"><Download size={15} /> تصدير</button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card className="p-4 flex items-center gap-3">
-          <div className="grid place-items-center w-10 h-10 rounded-xl bg-brand-50 text-brand-600"><Users size={20} /></div>
-          <div><p className="text-xs text-ink-500">طلاب (قاعدة البيانات)</p><p className="font-display font-700 text-ink-900 text-lg nums-latin">{dbStats.students}</p></div>
-        </Card>
-        <Card className="p-4 flex items-center gap-3">
-          <div className="grid place-items-center w-10 h-10 rounded-xl bg-accent-50 text-accent-600"><BarChart3 size={20} /></div>
-          <div><p className="text-xs text-ink-500">امتحانات (قاعدة البيانات)</p><p className="font-display font-700 text-ink-900 text-lg nums-latin">{dbStats.exams}</p></div>
-        </Card>
-        <Card className="p-4 flex items-center gap-3">
-          <div className="grid place-items-center w-10 h-10 rounded-xl bg-gold-500/10 text-gold-600"><Target size={20} /></div>
-          <div><p className="text-xs text-ink-500">متوسط الدرجة (DB)</p><p className="font-display font-700 text-ink-900 text-lg nums-latin">{dbStats.avgScore}%</p></div>
-        </Card>
-        <Card className="p-4 flex items-center gap-3">
-          <div className="grid place-items-center w-10 h-10 rounded-xl bg-brand-50 text-brand-600"><Activity size={20} /></div>
-          <div><p className="text-xs text-ink-500">النطاق الزمني</p><p className="font-display font-700 text-ink-900 text-lg">{timeRange}</p></div>
-        </Card>
-      </div>
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {[
-          { label: 'نسبة النجاح', value: '87.3%', delta: 1.9, icon: Target, tone: 'accent' as const, trend: [82, 83, 84, 85, 86, 87.3] },
-          { label: 'الاحتفاظ', value: '94.1%', delta: 2.4, icon: Users, tone: 'brand' as const, trend: [90, 91, 92, 92.5, 93, 94.1] },
-          { label: 'فعالية المعلّم', value: '8.6/10', delta: 0.4, icon: GraduationCap, tone: 'gold' as const, trend: [8.1, 8.2, 8.3, 8.4, 8.5, 8.6] },
-          { label: 'إيراد لكل متعلّم', value: '3.76$', delta: 4.2, icon: DollarSign, tone: 'brand' as const, trend: [3.1, 3.3, 3.4, 3.5, 3.6, 3.76] },
-        ].map((k) => (
-          <Card key={k.label} className="p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className={`grid place-items-center w-9 h-9 rounded-lg bg-${k.tone}-50 text-${k.tone}-600`}><k.icon size={17} /></div>
-              <span className={`flex items-center gap-0.5 text-xs font-700 nums-latin ${k.delta > 0 ? 'text-accent-600' : 'text-danger-600'}`}>{k.delta > 0 ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />}{Math.abs(k.delta)}%</span>
-            </div>
-            <p className="text-xs text-ink-500">{k.label}</p>
-            <p className="font-display text-2xl font-800 text-ink-900 mt-0.5 nums-latin">{k.value}</p>
-            <div className="h-8 mt-2"><Sparkline data={k.trend} tone={k.tone} className="w-full h-full" /></div>
-          </Card>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <Card className="xl:col-span-2 p-6">
-          <SectionHeader title="اتجاهات الأداء" subtitle="متوسطات متحرّكة لـ 6 أشهر عبر جميع المؤسسات" action={<BarChart3 size={18} className="text-ink-400" />} />
-          <div className="relative h-72">
-            <svg viewBox="0 0 600 280" className="w-full h-full" preserveAspectRatio="none">
-              {[0, 1, 2, 3, 4].map((i) => (
-                <line key={i} x1="0" x2="600" y1={i * 70} y2={i * 70} stroke="#eceef2" strokeWidth="1" />
-              ))}
-              {(() => {
-                const series = [
-                  { key: 'pass', color: '#3174ff', label: 'نسبة النجاح' },
-                  { key: 'attendance', color: '#10b981', label: 'الحضور' },
-                  { key: 'engagement', color: '#eab308', label: 'التفاعل' },
-                ];
-                return series.map((s) => {
-                  const pts = PERFORMANCE_DATA.map((d, i) => {
-                    const x = (i / (PERFORMANCE_DATA.length - 1)) * 600;
-                    const y = 280 - ((d[s.key as keyof typeof d] as number - 70) / 30) * 280;
-                    return `${x},${y}`;
-                  });
-                  return <polyline key={s.key} points={pts.join(' ')} fill="none" stroke={s.color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />;
-                });
-              })()}
-            </svg>
-            <div className="absolute bottom-0 left-0 right-0 flex justify-between text-[10px] text-ink-400 px-1">
-              {PERFORMANCE_DATA.map((d) => <span key={d.month}>{d.month}</span>)}
-            </div>
-          </div>
-          <div className="flex items-center gap-4 mt-3">
-            {[{ c: '#3174ff', l: 'نسبة النجاح' }, { c: '#10b981', l: 'الحضور' }, { c: '#eab308', l: 'التفاعل' }].map((s) => (
-              <span key={s.l} className="flex items-center gap-1.5 text-xs text-ink-600"><span className="w-2.5 h-2.5 rounded-full" style={{ background: s.c }} /> {s.l}</span>
-            ))}
-          </div>
-        </Card>
-
-        <Card className="p-6">
-          <SectionHeader title="التنبؤ بمخاطر الطلاب" subtitle="عوامل محدّدة بالذكاء الاصطناعي" action={<AlertTriangle size={18} className="text-warning-600" />} />
-          <div className="grid place-items-center my-4">
-            <div className="relative w-36 h-36">
-              <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
-                <circle cx="50" cy="50" r="42" fill="none" stroke="#eceef2" strokeWidth="8" />
-                <circle cx="50" cy="50" r="42" fill="none" stroke="#ef4444" strokeWidth="8" strokeLinecap="round" strokeDasharray={`${2 * Math.PI * 42 * 0.097} ${2 * Math.PI * 42}`} />
-              </svg>
-              <div className="absolute inset-0 grid place-items-center text-center">
-                <div>
-                  <p className="font-display text-2xl font-800 text-ink-900 nums-latin">9.7%</p>
-                  <p className="text-[10px] text-ink-500">معرّض للخطر</p>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div className="space-y-2.5">
-            {RISK_FACTORS.map((r) => (
-              <div key={r.factor}>
-                <div className="flex justify-between text-xs mb-1"><span className="text-ink-600">{r.factor}</span><span className="font-600 text-ink-700 nums-latin">{r.count.toLocaleString()}</span></div>
-                <ProgressBar value={r.pct} tone="danger" />
-              </div>
-            ))}
-          </div>
-        </Card>
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        <Card className="p-6">
-          <SectionHeader title="أداء المواد" subtitle="حسب القسم · هذا الفصل" />
-          <div className="space-y-3">
-            {SUBJECT_PERFORMANCE.map((s) => (
-              <div key={s.subject} className="flex items-center gap-3">
-                <span className="text-sm text-ink-700 w-40 truncate">{s.subject}</span>
-                <div className="flex-1"><ProgressBar value={s.score} tone={s.score > 85 ? 'accent' : s.score > 80 ? 'brand' : 'warning'} /></div>
-                <span className="text-sm font-700 text-ink-900 w-10 text-left nums-latin">{s.score}%</span>
-                <span className={`flex items-center gap-0.5 text-xs font-600 w-12 nums-latin ${s.change > 0 ? 'text-accent-600' : 'text-danger-600'}`}>{s.change > 0 ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}{Math.abs(s.change)}%</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        <Card className="p-6">
-          <SectionHeader title="مقارنة الفروع" subtitle="درجة الصحّة حسب المؤسسة" action={<Activity size={18} className="text-ink-400" />} />
-          <div className="space-y-3">
-            {BRANCHES.map((b) => (
-              <div key={b.id} className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-ink-50 transition">
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-600 text-ink-800 truncate">{b.name}</p>
-                  <p className="text-[11px] text-ink-400 nums-latin">{b.country} · {b.learners.toLocaleString()} متعلّم</p>
-                </div>
-                <div className="w-24"><ProgressBar value={b.health} tone={b.health > 90 ? 'accent' : 'brand'} /></div>
-                <span className="text-sm font-700 text-ink-900 w-10 text-left nums-latin">{b.health}</span>
-                <Badge tone={b.status === 'نشط' ? 'accent' : 'warning'}>{b.status}</Badge>
-              </div>
-            ))}
-          </div>
-        </Card>
-      </div>
-
-      <Card className="p-6">
-        <SectionHeader title="الأكثر تفوّقاً" subtitle="الطلاب الأكثر تحسّناً هذا الفصل" action={<TrendingUp size={18} className="text-accent-600" />} />
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {STUDENTS.filter((s) => s.status === 'متميّز' || s.status === 'على المسار').slice(0, 6).map((s) => (
-            <div key={s.id} className="flex items-center gap-3 p-3 rounded-xl border border-ink-100 hover:border-brand-200 transition">
-              <img src={s.avatar} alt={s.name} className="w-10 h-10 rounded-full object-cover" />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-600 text-ink-900 truncate">{s.name}</p>
-                <p className="text-[11px] text-ink-400 truncate">{s.institution}</p>
-              </div>
-              <div className="text-left">
-                <p className="text-sm font-700 text-ink-900 nums-latin">{s.gpa}</p>
-                <p className="text-[10px] text-ink-400">المعدّل</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Card>
-    </div>
-  );
+  if (loading) return <div className="flex justify-center py-20"><Loader2 size={28} className="animate-spin text-brand-600" /></div>;
+  if (error) return <Card className="p-6"><div className="flex items-center gap-2 text-danger-700"><AlertCircle size={18} /> تعذر تحميل التحليلات: {error}</div></Card>;
+  const activeStudents = data.students.filter((student) => student.is_active).length;
+  const cards: { label: string; value: string | number; icon: typeof Users }[] = [
+    { label: 'الطلاب النشطون', value: activeStudents, icon: Users },
+    { label: 'الامتحانات', value: metrics.exams.length, icon: BarChart3 },
+    { label: 'المحاولات', value: metrics.attempts.length, icon: Target },
+    { label: 'متوسط الدرجات', value: `${metrics.avgScore.toFixed(1)}%`, icon: Target },
+    { label: 'نسبة الحضور', value: `${metrics.attendanceRate.toFixed(1)}%`, icon: Users },
+  ];
+  return <div className="space-y-6">
+    <SectionHeader title="التحليلات وذكاء الأعمال" subtitle="مؤشرات حقيقية محسوبة من بيانات مؤسستك" action={<button onClick={exportAnalytics} className="btn-outline"><Download size={16} /> تصدير CSV</button>} />
+    <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex gap-1 p-1 bg-white rounded-xl border border-ink-100">{ranges.map((item) => <button key={item.value} onClick={() => setRange(item.value)} className={`px-3 py-1.5 rounded-lg text-xs font-600 ${range === item.value ? 'bg-brand-600 text-white' : 'text-ink-600 hover:bg-ink-50'}`}>{item.label}</button>)}</div><span className="text-xs text-ink-400">البيانات مفلترة حسب الفترة المختارة</span></div>
+    <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">{cards.map(({ label, value, icon: Icon }) => <Card key={label} className="p-4"><div className="flex items-center gap-2 text-ink-500"><Icon size={17} /><span className="text-xs">{label}</span></div><p className="font-display text-2xl font-800 text-ink-900 mt-2 nums-latin">{value}</p></Card>)}</div>
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{[['نسبة النجاح', metrics.passRate, 'من المحاولات التي لها درجات'], ['متوسط الدرجات', metrics.avgScore, 'من الامتحانات والمحاولات']].map(([label, value, note]) => <Card key={String(label)} className="p-5"><div className="flex justify-between text-sm"><span>{label}</span><strong className="nums-latin">{Number(value).toFixed(1)}%</strong></div><ProgressBar value={Number(value)} tone="brand" className="mt-3" /><p className="text-xs text-ink-400 mt-2">{note}</p></Card>)}</div>
+    <div className="grid grid-cols-1 xl:grid-cols-2 gap-6"><Card className="p-5"><SectionHeader title="أداء المواد" subtitle="محسوب من درجات المحاولات" />{metrics.subjectPerformance.length ? <div className="space-y-4">{metrics.subjectPerformance.map((row) => <div key={row.name}><div className="flex justify-between text-sm mb-1"><span>{row.name}</span><span className="nums-latin">{row.score.toFixed(1)}% · {row.count} محاولة</span></div><ProgressBar value={row.score} tone={row.score >= 60 ? 'accent' : 'danger'} /></div>)}</div> : <EmptyState title="لا توجد درجات بعد" subtitle="ستظهر هنا نتائج المحاولات المصححة." />}</Card><Card className="p-5"><SectionHeader title="مقارنة الفروع" subtitle="متوسط الدرجات حسب الفرع" />{metrics.branchPerformance.length ? <div className="space-y-4">{metrics.branchPerformance.map((row) => <div key={row.name} className="flex items-center gap-3"><span className="w-32 truncate text-sm">{row.name}</span><div className="flex-1"><ProgressBar value={row.score} tone="brand" /></div><span className="w-20 text-left text-sm nums-latin">{row.score.toFixed(1)}%</span></div>)}</div> : <EmptyState title="لا توجد بيانات فروع" subtitle="اربط الامتحانات بفصول وفروع لتظهر المقارنة." />}</Card></div>
+    <div className="grid grid-cols-1 xl:grid-cols-2 gap-6"><Card className="p-5"><SectionHeader title="أعلى الطلاب أداءً" subtitle="حسب متوسط الدرجات" />{metrics.topStudents.length ? <div className="space-y-3">{metrics.topStudents.map((student) => <div key={student.name} className="flex items-center gap-3 p-3 rounded-xl bg-ink-50"><div className="flex-1 font-600">{student.name}<span className="block text-xs text-ink-400">{student.count} محاولة</span></div><strong className="text-accent-700 nums-latin">{student.score.toFixed(1)}%</strong></div>)}</div> : <EmptyState title="لا توجد نتائج" subtitle="سيظهر الطلاب بعد تصحيح المحاولات." />}</Card><Card className="p-5"><SectionHeader title="طلاب يحتاجون متابعة" subtitle="انخفاض الدرجات أو ارتفاع الغياب" />{metrics.riskStudents.length ? <div className="space-y-3">{metrics.riskStudents.map((student) => <div key={student.name} className="flex items-center gap-3 p-3 rounded-xl bg-danger-50"><div className="flex-1 font-600">{student.name}<span className="block text-xs text-ink-500">متوسط: {student.score ? `${student.score.toFixed(1)}%` : 'لا توجد درجات'}</span></div><Badge tone="danger">متابعة</Badge></div>)}</div> : <EmptyState title="لا توجد إشارات خطر" subtitle="لا توجد مؤشرات متابعة في الفترة الحالية." />}</Card></div>
+    {!data.students.length && !data.exams.length && !data.grades.length && <Card><EmptyState title="لا توجد بيانات تحليلية بعد" subtitle="ابدأ بإضافة طلاب وإنشاء امتحانات وتسجيل محاولات حتى تظهر المؤشرات الحقيقية." /></Card>}
+  </div>;
 }
