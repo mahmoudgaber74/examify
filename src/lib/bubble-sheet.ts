@@ -113,13 +113,14 @@ export async function generateBubbleSheetPDF(config: BubbleSheetConfig): Promise
   // layout similar to a composite aptitude sheet while keeping one global
   // question sequence for the OMR engine.
   const bubbleRadius = 2.8;
-  const colSpacing = 9;
   const rowSpacing = 8;
   const questionLabelW = 8;
   const panelGap = 4;
-  const panelW = (pageW - (margin * 2) - (panelGap * 2)) / 3;
   const sections = config.sections?.filter((section) => section.title.trim() && section.questionsCount > 0) ?? [];
   const layoutSections = sections.length > 0 ? sections : [{ title: examTitle, questionsCount }];
+  const layoutColumnCount = Math.min(Math.max(layoutSections.length, 1), 4);
+  const colSpacing = layoutColumnCount === 4 ? 6.4 : 9;
+  const panelW = (pageW - (margin * 2) - (panelGap * (layoutColumnCount - 1))) / layoutColumnCount;
   const maxRowsPerPanel = Math.max(1, Math.floor((pageH - y - 48) / rowSpacing));
   const panelPages = Math.max(...layoutSections.map((section) => Math.ceil(section.questionsCount / maxRowsPerPanel)), 1);
   for (let pageIndex = 0; pageIndex < panelPages; pageIndex++) {
@@ -131,7 +132,7 @@ export async function generateBubbleSheetPDF(config: BubbleSheetConfig): Promise
     const panelRows = layoutSections.map((section) => Math.min(maxRowsPerPanel, Math.max(0, section.questionsCount - (pageIndex * maxRowsPerPanel))));
     const panelH = 14 + Math.max(...panelRows, 1) * rowSpacing;
 
-    layoutSections.slice(0, 3).forEach((section, sectionIndex) => {
+    layoutSections.slice(0, 4).forEach((section, sectionIndex) => {
       const visibleRows = panelRows[sectionIndex] ?? 0;
       const panelX = margin + sectionIndex * (panelW + panelGap);
       pdf.setDrawColor(45);

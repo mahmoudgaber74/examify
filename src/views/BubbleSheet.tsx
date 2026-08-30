@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { FileText, Loader2, AlertCircle, Download, Upload, ScanLine, Eye, Check, X, Trash2 } from 'lucide-react';
+import { FileText, Loader2, AlertCircle, Download, Upload, ScanLine, Eye, Check, X, Trash2, Plus, ChevronUp, ChevronDown } from 'lucide-react';
 import { Card, SectionHeader, Badge, EmptyState } from '../components/ui';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
 import { generateBubbleSheetPDF, downloadBlob, type BubbleSheetSection } from '../lib/bubble-sheet';
 import { scanBubbleSheet, type OmrScanResult } from '../lib/omr-scanner';
 
 interface ExamRow { id: string; title: string; status: string; }
+interface ExamSectionRow { id: string; title: string; sort_order: number; }
 interface StudentRow { id: string; full_name: string; student_code: string | null; }
 interface BubbleSheetRow {
   id: string;
@@ -216,11 +217,54 @@ function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; in
     { title: 'المفردات الشاذة', questionsCount: 16 },
     { title: 'كمي', questionsCount: 10 },
   ]);
+  const [loadingExamSections, setLoadingExamSections] = useState(false);
   const [includeStudentId, setIncludeStudentId] = useState(true);
   const [includeStudentName, setIncludeStudentName] = useState(true);
   const [includeQr, setIncludeQr] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!examId) return;
+    let cancelled = false;
+    async function loadExamStructure() {
+      setLoadingExamSections(true);
+      const [{ data: sectionRows }, { count }] = await Promise.all([
+        supabase.from('exam_sections').select('id, title, sort_order').eq('exam_id', examId).order('sort_order').order('created_at'),
+        supabase.from('exam_questions').select('id', { count: 'exact', head: true }).eq('exam_id', examId),
+      ]);
+      if (cancelled) return;
+      const rows = (sectionRows as ExamSectionRow[]) ?? [];
+      if (rows.length) {
+        const { data: questionRows } = await supabase.from('exam_questions').select('section_id').eq('exam_id', examId);
+        const counts = new Map<string, number>();
+        for (const row of (questionRows as { section_id: string | null }[]) ?? []) {
+          if (row.section_id) counts.set(row.section_id, (counts.get(row.section_id) ?? 0) + 1);
+        }
+        const populatedRows = rows.filter((row) => (counts.get(row.id) ?? 0) > 0);
+        setSections((populatedRows.length ? populatedRows : rows).map((row) => ({ title: row.title, questionsCount: counts.get(row.id) ?? 1 })));
+      } else {
+        setSections([{ title: 'الأسئلة', questionsCount: count ?? 20 }]);
+      }
+      setLoadingExamSections(false);
+    }
+    loadExamStructure().catch(() => { if (!cancelled) setLoadingExamSections(false); });
+    return () => { cancelled = true; };
+  }, [examId]);
+
+  function updateSection(index: number, patch: Partial<BubbleSheetSection>) {
+    setSections((items) => items.map((item, i) => i === index ? { ...item, ...patch } : item));
+  }
+
+  function moveSection(index: number, direction: -1 | 1) {
+    setSections((items) => {
+      const target = index + direction;
+      if (target < 0 || target >= items.length) return items;
+      const next = [...items];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }
 
   async function handleGenerate() {
     setGenerating(true);
@@ -229,7 +273,8 @@ function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; in
     const exam = exams.find((e) => e.id === examId);
     if (!exam) { setError('الامتحان غير موجود'); setGenerating(false); return; }
     const activeSections = sectionsEnabled ? sections.filter((section) => section.title.trim() && section.questionsCount > 0) : [];
-    if (sectionsEnabled && (activeSections.length < 2 || activeSections.length > 3)) { setError('النموذج المركّب يدعم من قسمين إلى 3 أقسام.'); setGenerating(false); return; }
+    if (sectionsEnabled && (activeSections.length < 2 || activeSections.length > 4)) { setError('النموذج المركّب يدعم من قسمين إلى 4 أقسام.'); setGenerating(false); return; }
+    if (sectionsEnabled && activeSections.some((section) => !Number.isInteger(section.questionsCount) || section.questionsCount < 1)) { setError('عدد أسئلة كل قسم يجب أن يكون رقمًا صحيحًا.'); setGenerating(false); return; }
     const totalQuestions = activeSections.reduce((sum, section) => sum + section.questionsCount, 0) || questionsCount;
 
     try {
@@ -250,7 +295,38 @@ function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; in
       });
       downloadBlob(blob, `bubble-sheet-${exam.title}-${modelLabel}.pdf`);
 
-      await supabase.from('bubble_sheets').insert({
+      if (sectionsEnabled) {
+        const { data: existingSections, error: sectionsError } = await supabase.from('exam_sections').select('id').eq('exam_id', examId).order('sort_order').order('created_at');
+        if (sectionsError) throw sectionsError;
+        const existingIds = ((existingSections as { id: string }[]) ?? []).map((row) => row.id);
+        const sectionIds: string[] = [];
+        for (let index = 0; index < activeSections.length; index++) {
+          const existingId = existingIds[index];
+          if (existingId) {
+            const { error: updateError } = await supabase.from('exam_sections').update({ title: activeSections[index].title.trim(), sort_order: index }).eq('id', existingId);
+            if (updateError) throw updateError;
+            sectionIds.push(existingId);
+          } else {
+            const { data: created, error: createError } = await supabase.from('exam_sections').insert({ exam_id: examId, title: activeSections[index].title.trim(), sort_order: index }).select('id').single();
+            if (createError) throw createError;
+            sectionIds.push((created as { id: string }).id);
+          }
+        }
+        const { data: examQuestionRows, error: questionLoadError } = await supabase.from('exam_questions').select('id').eq('exam_id', examId).order('sort_order').order('id');
+        if (questionLoadError) throw questionLoadError;
+        if (((examQuestionRows as { id: string }[]) ?? []).length !== totalQuestions) throw new Error('إجمالي أسئلة الأقسام يجب أن يساوي عدد أسئلة الامتحان الفعلي.');
+        let offset = 0;
+        for (let index = 0; index < activeSections.length; index++) {
+          const ids = ((examQuestionRows as { id: string }[]) ?? []).slice(offset, offset + activeSections[index].questionsCount).map((row) => row.id);
+          if (ids.length) {
+            const { error: assignError } = await supabase.from('exam_questions').update({ section_id: sectionIds[index] }).in('id', ids);
+            if (assignError) throw assignError;
+          }
+          offset += activeSections[index].questionsCount;
+        }
+      }
+
+      const { error: sheetError } = await supabase.from('bubble_sheets').insert({
         institution_id: institutionId,
         exam_id: examId,
         model_label: modelLabel,
@@ -265,6 +341,7 @@ function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; in
         status: 'active',
         generated_by: (await supabase.auth.getUser()).data.user?.id ?? null,
       });
+      if (sheetError) throw sheetError;
 
       onCreated();
     } catch (e) {
@@ -308,12 +385,18 @@ function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; in
           <input type="checkbox" checked={sectionsEnabled} onChange={(e) => setSectionsEnabled(e.target.checked)} />
           إنشاء ورقة مركّبة بأقسام متعددة
         </label>
-        <p className="text-xs text-brand-700 mt-1.5">ستظهر الأقسام في 3 خانات داخل ورقة واحدة، وسيتم تصحيحها بترقيم متتابع.</p>
+        <p className="text-xs text-brand-700 mt-1.5">الأقسام مرتبطة بالامتحان ويتم ترقيم أسئلتها تلقائيًا حسب ترتيب الأقسام. يمكنك إنشاء من قسمين إلى 4 أقسام.</p>
         {sectionsEnabled && <div className="mt-3 space-y-2">
-          {sections.map((section, index) => <div key={index} className="grid grid-cols-[1fr_100px] gap-2">
+          {sections.map((section, index) => <div key={index} className="grid grid-cols-[1fr_100px_auto] gap-2 items-center">
             <input className="input" value={section.title} onChange={(e) => setSections((items) => items.map((item, i) => i === index ? { ...item, title: e.target.value } : item))} placeholder={`اسم القسم ${index + 1}`} aria-label={`اسم القسم ${index + 1}`} />
             <input className="input nums-latin" type="number" min="1" max="60" value={section.questionsCount} onChange={(e) => setSections((items) => items.map((item, i) => i === index ? { ...item, questionsCount: Number(e.target.value) } : item))} aria-label={`عدد أسئلة القسم ${index + 1}`} />
+            <div className="flex items-center gap-1">
+              <button type="button" title="تقديم" onClick={() => moveSection(index, -1)} disabled={index === 0} className="p-1 rounded border border-ink-200 disabled:opacity-30"><ChevronUp size={14} /></button>
+              <button type="button" title="تأخير" onClick={() => moveSection(index, 1)} disabled={index === sections.length - 1} className="p-1 rounded border border-ink-200 disabled:opacity-30"><ChevronDown size={14} /></button>
+              <button type="button" title="حذف" onClick={() => setSections((items) => items.filter((_, i) => i !== index))} disabled={sections.length <= 1} className="p-1 rounded border border-danger-200 text-danger-600 disabled:opacity-30"><Trash2 size={14} /></button>
+            </div>
           </div>)}
+          <button type="button" onClick={() => sections.length < 4 && setSections((items) => [...items, { title: `القسم ${items.length + 1}`, questionsCount: 10 }])} disabled={sections.length >= 4} className="btn-outline !py-1.5 text-xs"><Plus size={14} /> إضافة قسم</button>
           <p className="text-xs text-ink-500">إجمالي الأسئلة: <strong className="nums-latin">{sections.reduce((sum, section) => sum + section.questionsCount, 0)}</strong></p>
         </div>}
       </div>
@@ -339,6 +422,7 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
   const [scanResult, setScanResult] = useState<OmrScanResult | null>(null);
   const [correctAnswers, setCorrectAnswers] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
+
   const selectedSheet = useMemo(() => sheets.find((s) => s.exam_id === examId) ?? null, [examId, sheets]);
 
   useEffect(() => {
@@ -479,7 +563,7 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
             template_token: selectedSheet?.qr_token ?? null,
             questions_count: questionsCount,
             choices_count: choicesCount,
-            columns: Math.max(1, Math.ceil(questionsCount / 25)),
+            columns: selectedSheet?.sections?.length ? Math.min(selectedSheet.sections.length, 4) : Math.max(1, Math.ceil(questionsCount / 25)),
             sections: selectedSheet?.sections ?? [],
           },
         });
@@ -521,7 +605,7 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
         result = await scanBubbleSheet(file, {
           questionsCount,
           choicesCount,
-          columns: selectedSheet?.sections?.length ? 3 : Math.max(1, Math.ceil(questionsCount / 25)),
+          columns: selectedSheet?.sections?.length ? Math.min(selectedSheet.sections.length, 4) : Math.max(1, Math.ceil(questionsCount / 25)),
           sections: selectedSheet?.sections,
         });
       }
