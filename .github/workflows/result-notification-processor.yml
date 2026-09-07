@@ -1,0 +1,46 @@
+name: Process result notifications
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: result-notification-processor
+  cancel-in-progress: false
+
+jobs:
+  process:
+    name: Process pending result notifications
+    runs-on: ubuntu-latest
+    env:
+      PROCESSOR_INTERNAL_TOKEN: ${{ secrets.PROCESSOR_INTERNAL_TOKEN }}
+    steps:
+      - name: Invoke internal batch processor
+        shell: bash
+        run: |
+          set -euo pipefail
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+
+          http_code="$(curl \
+            --silent \
+            --show-error \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header "Authorization: Bearer ${PROCESSOR_INTERNAL_TOKEN}" \
+            --header 'Content-Type: application/json' \
+            --data '{"batch":true}' \
+            'https://jtwrpynqspafifzjiwyg.supabase.co/functions/v1/process-result-notifications')"
+
+          cat "$response_file"
+          printf '\n'
+
+          if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
+            echo "Processor returned HTTP ${http_code}" >&2
+            exit 1
+          fi
