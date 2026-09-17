@@ -68,10 +68,11 @@ Changed test/fixture files include:
 | GitHub source push | PASS | `origin/main` advanced to commit `991bcc8` |
 | Linked Supabase migrations | PASS | 9 previously missing migrations applied; follow-up dry-run reports the remote database is up to date |
 | Linked Supabase Edge Functions | PASS | 7 functions deployed; all reported `ACTIVE` |
+| Vercel public endpoint | PASS | `https://examifylugano.vercel.app/` returned HTTP 200 from Vercel with the configured security headers |
 | Staging migration apply | NOT RUN | No staging project or credentials were provided |
 | Playwright E2E UI suite | FAIL — 28 passed, 13 failed, 4 did not run | `npm run test:e2e`; Chromium desktop/mobile executed against local Vite/Supabase |
 | In-app browser/manual retest | BLOCKED | In-app browser runtime could not initialize because the Node kernel asset path was unavailable |
-| Vercel deployment status | NOT VERIFIED | Vercel CLI/token is unavailable here; verify the deployment attached to `origin/main` before treating it as live |
+| Vercel deployment identity | NOT VERIFIED | Vercel CLI/token is unavailable here; endpoint health is confirmed, but the deployed commit cannot be independently read |
 
 Full API suite breakdown:
 
