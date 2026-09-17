@@ -1,28 +1,15 @@
-/* Define result publication before the security migration revokes it. */
+/*
+  The remote project already owns the later, canonical jsonb-returning
+  publish_exam_result(uuid) implementation from the exam-lifecycle migration.
+  Keep that implementation intact and only restore the intended privilege
+  boundary while recording this historical migration as applied.
+*/
 
-CREATE OR REPLACE FUNCTION public.publish_exam_result(p_attempt_id uuid)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-DECLARE
-  v_caller_role text;
+DO $$
 BEGIN
-  SELECT role INTO v_caller_role
-  FROM public.staff_profiles
-  WHERE user_id = auth.uid() AND is_active = true;
-
-  IF v_caller_role IS NULL OR v_caller_role NOT IN ('super_admin', 'school_admin', 'teacher') THEN
-    RAISE EXCEPTION 'Not authorized to publish results';
+  IF to_regprocedure('public.publish_exam_result(uuid)') IS NULL THEN
+    RAISE EXCEPTION 'publish_exam_result(uuid) must exist before this compatibility migration';
   END IF;
-
-  UPDATE public.exam_attempts
-  SET is_result_published = true
-  WHERE id = p_attempt_id;
-
-  INSERT INTO public.audit_log (actor_id, actor_role, action, entity_type, entity_id)
-  VALUES (auth.uid(), v_caller_role, 'publish_result', 'exam_attempt', p_attempt_id);
 END;
 $$;
 
