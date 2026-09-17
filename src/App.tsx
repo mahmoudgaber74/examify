@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { Sidebar, MobileNav } from './components/Sidebar';
 import { Topbar } from './components/Topbar';
 import { PWAInstallPrompt } from './components/PWAInstall';
@@ -6,35 +6,38 @@ import { AuthProvider, useAuth } from './components/AuthProvider';
 import { Auth } from './views/Auth';
 import { LandingPage } from './views/LandingPage';
 import { type ViewId, NAV_ITEMS } from './lib/navigation';
-import { Dashboard } from './views/Dashboard';
-import { Assessment } from './views/Assessment';
-import { Tutor } from './views/Tutor';
-import { Grading } from './views/Grading';
-import { Analytics } from './views/Analytics';
-import { LMS } from './views/LMS';
-import { Programming } from './views/Programming';
-import { MathEngine } from './views/MathEngine';
-import { Certification } from './views/Certification';
-import { Marketplace } from './views/Marketplace';
-import { SIS } from './views/SIS';
-import { Parents } from './views/Parents';
-import { Settings } from './views/Settings';
-import { QuestionBank } from './views/QuestionBank';
-import { ExamBuilder } from './views/ExamBuilder';
-import { ExamRunner } from './views/ExamRunner';
-import { ExamResults } from './views/ExamResults';
-import { Institutions } from './views/Institutions';
-import { AcademicSetup } from './views/AcademicSetup';
-import { BubbleSheet } from './views/BubbleSheet';
-import { OmrOperations } from './views/OmrOperations';
-import { Reports } from './views/Reports';
-import { AiEngine } from './views/AiEngine';
 import { Loader2 } from 'lucide-react';
 import { FeedbackProvider } from './components/FeedbackProvider';
 import { trackMarketingEvent } from './lib/marketing-analytics';
 import { supabase } from './lib/auth';
 import { applyInstitutionTheme } from './lib/institution-theme';
 import { MfaGate } from './components/MfaGate';
+
+// Protected views are loaded only when the authenticated user navigates to them.
+// Auth and LandingPage stay eager so the initial unauthenticated render remains small.
+const Dashboard = lazy(() => import('./views/Dashboard').then(({ Dashboard }) => ({ default: Dashboard })));
+const Assessment = lazy(() => import('./views/Assessment').then(({ Assessment }) => ({ default: Assessment })));
+const Tutor = lazy(() => import('./views/Tutor').then(({ Tutor }) => ({ default: Tutor })));
+const Grading = lazy(() => import('./views/Grading').then(({ Grading }) => ({ default: Grading })));
+const Analytics = lazy(() => import('./views/Analytics').then(({ Analytics }) => ({ default: Analytics })));
+const LMS = lazy(() => import('./views/LMS').then(({ LMS }) => ({ default: LMS })));
+const Programming = lazy(() => import('./views/Programming').then(({ Programming }) => ({ default: Programming })));
+const MathEngine = lazy(() => import('./views/MathEngine').then(({ MathEngine }) => ({ default: MathEngine })));
+const Certification = lazy(() => import('./views/Certification').then(({ Certification }) => ({ default: Certification })));
+const Marketplace = lazy(() => import('./views/Marketplace').then(({ Marketplace }) => ({ default: Marketplace })));
+const SIS = lazy(() => import('./views/SIS').then(({ SIS }) => ({ default: SIS })));
+const Parents = lazy(() => import('./views/Parents').then(({ Parents }) => ({ default: Parents })));
+const Settings = lazy(() => import('./views/Settings').then(({ Settings }) => ({ default: Settings })));
+const QuestionBank = lazy(() => import('./views/QuestionBank').then(({ QuestionBank }) => ({ default: QuestionBank })));
+const ExamBuilder = lazy(() => import('./views/ExamBuilder').then(({ ExamBuilder }) => ({ default: ExamBuilder })));
+const ExamRunner = lazy(() => import('./views/ExamRunner').then(({ ExamRunner }) => ({ default: ExamRunner })));
+const ExamResults = lazy(() => import('./views/ExamResults').then(({ ExamResults }) => ({ default: ExamResults })));
+const Institutions = lazy(() => import('./views/Institutions').then(({ Institutions }) => ({ default: Institutions })));
+const AcademicSetup = lazy(() => import('./views/AcademicSetup').then(({ AcademicSetup }) => ({ default: AcademicSetup })));
+const BubbleSheet = lazy(() => import('./views/BubbleSheet').then(({ BubbleSheet }) => ({ default: BubbleSheet })));
+const OmrOperations = lazy(() => import('./views/OmrOperations').then(({ OmrOperations }) => ({ default: OmrOperations })));
+const Reports = lazy(() => import('./views/Reports').then(({ Reports }) => ({ default: Reports })));
+const AiEngine = lazy(() => import('./views/AiEngine').then(({ AiEngine }) => ({ default: AiEngine })));
 
 const SUBTITLES: Record<ViewId, string> = {
   dashboard: 'ذكاء لحظي عبر جميع المؤسسات والفروع والمتعلمين',
@@ -181,6 +184,11 @@ function AppContent() {
         <Topbar title={activeItem?.label ?? 'إكزاميفاي AI'} subtitle={SUBTITLES[safeView]} onNavigate={setView} accessibleViews={accessibleViews} onCreateExam={() => setView('exambuilder')} />
         <main className="flex-1 overflow-y-auto">
           <div key={safeView} className="animate-fade-in p-5 lg:p-8 max-w-[1600px] mx-auto">
+            <Suspense fallback={(
+              <div className="flex min-h-[60vh] items-center justify-center" role="status" aria-live="polite">
+                <Loader2 size={28} className="animate-spin text-brand-600" aria-label="Loading page" />
+              </div>
+            )}>
             {safeView === 'dashboard' && <Dashboard onNavigate={setView} />}
             {safeView === 'assessment' && <Assessment />}
             {safeView === 'tutor' && <Tutor />}
@@ -204,6 +212,7 @@ function AppContent() {
             {safeView === 'aiengine' && <AiEngine />}
             {safeView === 'institutions' && <Institutions />}
             {safeView === 'academicsetup' && <AcademicSetup />}
+            </Suspense>
           </div>
         </main>
       </div>
