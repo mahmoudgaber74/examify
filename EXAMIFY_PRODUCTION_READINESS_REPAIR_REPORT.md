@@ -6,7 +6,7 @@ Date: 2026-09-17
 
 **PARTIAL — local code, API, Python, and static security gates pass; production readiness is not certified.**
 
-No direct production database, Supabase project, queue, worker, or external AI provider was changed. The reviewed source was pushed to `origin/main`; the status of any Vercel auto-deployment still needs confirmation from the Vercel project. Staging and real-browser acceptance remain required before marking this work `COMPLETE` or accepting payment traffic.
+The reviewed source was pushed to `origin/main`. The linked Supabase project was updated with the missing migrations and Edge Function deployments; the OMR Docker service/worker and any Vercel auto-deployment still need separate confirmation. Staging and real-browser acceptance remain required before marking this work `COMPLETE` or accepting payment traffic.
 
 ## Repairs completed
 
@@ -66,6 +66,8 @@ Changed test/fixture files include:
 | OMR Python suite | PASS | `python -m pytest services/omr-service/tests -q`; 41 passed in 5.77s |
 | Local Supabase runtime | PASS | Local REST, Storage, RPC, RLS, and fixture flows exercised |
 | GitHub source push | PASS | `origin/main` advanced to commit `991bcc8` |
+| Linked Supabase migrations | PASS | 9 previously missing migrations applied; follow-up dry-run reports the remote database is up to date |
+| Linked Supabase Edge Functions | PASS | 7 functions deployed; all reported `ACTIVE` |
 | Staging migration apply | NOT RUN | No staging project or credentials were provided |
 | Playwright E2E UI suite | FAIL — 28 passed, 13 failed, 4 did not run | `npm run test:e2e`; Chromium desktop/mobile executed against local Vite/Supabase |
 | In-app browser/manual retest | BLOCKED | In-app browser runtime could not initialize because the Node kernel asset path was unavailable |
