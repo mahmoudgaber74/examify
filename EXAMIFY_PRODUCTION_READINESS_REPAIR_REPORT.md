@@ -6,7 +6,7 @@ Date: 2026-09-17
 
 **PARTIAL — local code, API, Python, and static security gates pass; production readiness is not certified.**
 
-No production database, Supabase project, Vercel deployment, queue, worker, or external AI provider was changed. Staging and real-browser acceptance remain required before marking this work `COMPLETE` or accepting payment traffic.
+No direct production database, Supabase project, queue, worker, or external AI provider was changed. The reviewed source was pushed to `origin/main`; the status of any Vercel auto-deployment still needs confirmation from the Vercel project. Staging and real-browser acceptance remain required before marking this work `COMPLETE` or accepting payment traffic.
 
 ## Repairs completed
 
@@ -65,10 +65,11 @@ Changed test/fixture files include:
 | Full local API suite | PASS | `npm run test:api`; all suites completed successfully |
 | OMR Python suite | PASS | `python -m pytest services/omr-service/tests -q`; 41 passed in 5.77s |
 | Local Supabase runtime | PASS | Local REST, Storage, RPC, RLS, and fixture flows exercised |
+| GitHub source push | PASS | `origin/main` advanced to commit `991bcc8` |
 | Staging migration apply | NOT RUN | No staging project or credentials were provided |
 | Playwright E2E UI suite | FAIL — 28 passed, 13 failed, 4 did not run | `npm run test:e2e`; Chromium desktop/mobile executed against local Vite/Supabase |
 | In-app browser/manual retest | BLOCKED | In-app browser runtime could not initialize because the Node kernel asset path was unavailable |
-| Production/Vercel deployment | NOT RUN BY DESIGN | Production was intentionally left untouched |
+| Vercel deployment status | NOT VERIFIED | Vercel CLI/token is unavailable here; verify the deployment attached to `origin/main` before treating it as live |
 
 Full API suite breakdown:
 
