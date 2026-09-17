@@ -5,6 +5,7 @@ import json
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from collections import deque
 
 import cv2
@@ -16,14 +17,36 @@ from .config import get_settings
 from .models import AnalyzeRequest, AnalyzeResponse, HealthResponse, TemplateMetadata
 from .processing.annotations import annotate
 from .processing.bubble_detector import build_grid, detect_bubbles
-from .processing.document_detector import registration_mark_confidence
-from .processing.preprocess import detect_document, normalize_for_omr
+from .processing.document_detector import registration_mark_confidence, trusted_v2_full_frame_confidence
+from .processing.preprocess import PreparedPage, detect_document, normalize_for_omr
 from .processing.qr_reader import read_qr
 from .processing.scoring import summarize
+from .processing.v2_detector import detect_v2_bubbles
 
 settings = get_settings()
 app = FastAPI(title="Examify OpenCV OMR Service", version=settings.service_version)
 seen_requests: deque[tuple[str, float]] = deque(maxlen=2048)
+
+
+def _qr_validation_warning(detected_qr: str | None, template: TemplateMetadata) -> str | None:
+    if template.layout_schema_version >= 2:
+        if not detected_qr:
+            return "qr_not_detected"
+        if not detected_qr.startswith("v2:"):
+            return "qr_payload_invalid"
+        try:
+            uuid.UUID(detected_qr[3:])
+        except (ValueError, AttributeError):
+            return "qr_payload_invalid"
+        return None
+
+    if not detected_qr or not template.template_token:
+        return None
+    try:
+        token = json.loads(detected_qr).get("t")
+    except (json.JSONDecodeError, AttributeError):
+        return "qr_payload_invalid"
+    return "qr_template_token_mismatch" if token != template.template_token else None
 
 
 def _authorize(request: Request, body: bytes, request_id: str) -> None:
@@ -121,6 +144,15 @@ async def analyze(request: Request) -> AnalyzeResponse:
     except Exception as exc:
         raise HTTPException(status_code=422, detail="invalid_omr_request") from exc
     _authorize(request, body, payload.request_id)
+    if payload.template.layout_schema_version >= 2:
+        if payload.v2_page_context is None or payload.v2_page_context.layout_schema_version != 2:
+            raise HTTPException(status_code=422, detail="v2_page_context_required")
+        if payload.expected_v2_page_token is None:
+            raise HTTPException(status_code=422, detail="expected_v2_page_token_required")
+        if payload.v2_page_context.page_count < 1 or payload.v2_page_context.page_index < 1 or payload.v2_page_context.page_index > payload.v2_page_context.page_count:
+            raise HTTPException(status_code=422, detail="v2_page_context_invalid")
+    elif payload.v2_page_context is not None:
+        raise HTTPException(status_code=422, detail="v2_page_context_not_allowed_for_legacy")
     raw, mime = _source(payload)
     pages = _pages(raw, mime)
     all_questions = []
@@ -129,12 +161,35 @@ async def analyze(request: Request) -> AnalyzeResponse:
     detected_qr: str | None = None
     document_scores: list[float] = []
     offset = 0
+    if payload.template.layout_schema_version >= 2 and len(pages) != 1:
+        raise HTTPException(status_code=422, detail="v2_single_page_required")
     for page in pages:
         prepared = detect_document(page)
-        document_scores.append(prepared.document_confidence)
         gray, binary = normalize_for_omr(prepared.image)
         qr_value, qr_warnings = read_qr(prepared.image)
         detected_qr = detected_qr or qr_value
+        if payload.template.layout_schema_version >= 2:
+            expected_qr = f"v2:{payload.expected_v2_page_token}"
+            valid_v2_qr = _qr_validation_warning(qr_value, payload.template) is None
+            token_matches = valid_v2_qr and qr_value == expected_qr
+            if valid_v2_qr and not token_matches:
+                qr_warnings.append("qr_page_token_mismatch")
+            if (prepared.mode == "uncertain_fallback" and payload.v2_page_context is not None
+                    and token_matches):
+                full_frame_confidence = trusted_v2_full_frame_confidence(
+                    binary,
+                    page.shape,
+                    payload.v2_page_context.orientation,
+                )
+                if full_frame_confidence is not None:
+                    prepared = PreparedPage(prepared.image, full_frame_confidence, [], "trusted_full_frame")
+            document_scores.append(prepared.document_confidence)
+            page_questions = detect_v2_bubbles(binary, payload.v2_page_context, settings) if payload.v2_page_context else []
+            all_questions.extend(page_questions)
+            all_annotations.append(annotate(prepared.image, page_questions))
+            all_warnings.extend(prepared.warnings + qr_warnings)
+            continue
+        document_scores.append(prepared.document_confidence)
         mark_confidence = registration_mark_confidence(binary)
         page_warnings = prepared.warnings + qr_warnings
         page_capacity = build_grid(payload.template).rows_per_column * build_grid(payload.template).columns
@@ -152,17 +207,16 @@ async def analyze(request: Request) -> AnalyzeResponse:
         document_scores.append(mark_confidence)
         offset += page_count
     document_confidence = round(float(np.mean(document_scores)) if document_scores else 0.0, 4)
-    question_confidence, needs_review, warnings = summarize(all_questions, document_confidence, all_warnings)
+    question_confidence, needs_review, warnings = summarize(
+        all_questions,
+        document_confidence,
+        all_warnings,
+        payload.template.layout_schema_version,
+    )
     processing_status = "needs_review" if needs_review else "completed"
-    if detected_qr and payload.template.template_token:
-        try:
-            token = json.loads(detected_qr).get("t")
-            if token != payload.template.template_token:
-                warnings.append("qr_template_token_mismatch")
-                needs_review = True
-                processing_status = "needs_review"
-        except (json.JSONDecodeError, AttributeError):
-            warnings.append("qr_payload_invalid")
-            needs_review = True
-            processing_status = "needs_review"
+    qr_validation_warning = _qr_validation_warning(detected_qr, payload.template)
+    if qr_validation_warning:
+        warnings.append(qr_validation_warning)
+        needs_review = True
+        processing_status = "needs_review"
     return AnalyzeResponse(request_id=payload.request_id, template_token=payload.template.template_token, page_count=len(pages), processing_status=processing_status, processing_time_ms=int((time.perf_counter() - started) * 1000), detected_qr=detected_qr, document_confidence=document_confidence, questions=all_questions, warnings=sorted(set(warnings)), requires_manual_review=needs_review, annotated_images=all_annotations)

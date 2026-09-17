@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertCircle, BookOpen, Calendar, Check, GraduationCap, Layers3, Loader2, Plus, Search, ToggleLeft, ToggleRight, UserCheck, X } from 'lucide-react';
+import { AlertCircle, ArrowRight, BookOpen, Calendar, Check, GraduationCap, Layers3, Loader2, Plus, Search, ToggleLeft, ToggleRight, UserCheck } from 'lucide-react';
 import { Badge, Card, EmptyState, SectionHeader } from '../components/ui';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
 import type { UserRole } from '../lib/auth';
+import { useFeedback } from '../components/FeedbackProvider';
 
 type Tab = 'years' | 'stages' | 'grades' | 'classes' | 'subjects' | 'gradeSubjects' | 'teachers';
 
@@ -29,6 +30,7 @@ const tabs: { id: Tab; label: string }[] = [
 
 export function AcademicSetup() {
   const { institutionId, role } = useAuthSafe();
+  const { confirm } = useFeedback();
   const canManage = ['super_admin', 'school_admin'].includes(role as UserRole);
   const [tab, setTab] = useState<Tab>('years');
   const [query, setQuery] = useState('');
@@ -97,7 +99,7 @@ export function AcademicSetup() {
   }
 
   async function toggle(table: string, id: string, isActive: boolean) {
-    if (isActive && !confirm('سيتم تعطيل السجل للعمليات الجديدة مع بقاء البيانات المرتبطة. هل تريد المتابعة؟')) return;
+    if (isActive && !(await confirm('سيتم تعطيل السجل للعمليات الجديدة مع بقاء البيانات المرتبطة. هل تريد المتابعة؟', { title: 'تعطيل السجل', confirmLabel: 'تعطيل السجل' }))) return;
     const { error: err } = await supabase.from(table).update({ is_active: !isActive }).eq('id', id);
     if (err) { setError(err.message); return; }
     setNotice(isActive ? 'تم التعطيل.' : 'تم التفعيل.');
@@ -119,22 +121,24 @@ export function AcademicSetup() {
       <Card className="p-3">
         <div className="flex gap-1 overflow-x-auto">
           {tabs.map((item) => (
-            <button data-testid={`academic-tab-${item.id}`} key={item.id} onClick={() => setTab(item.id)} className={`px-3 py-2 rounded-lg text-sm font-600 whitespace-nowrap ${tab === item.id ? 'bg-brand-600 text-white' : 'text-ink-600 hover:bg-ink-100'}`}>
+            <button data-testid={`academic-tab-${item.id}`} key={item.id} onClick={() => { setTab(item.id); setEditing(null); }} className={`px-4 py-3 rounded-lg text-base font-600 whitespace-nowrap ${tab === item.id ? 'bg-brand-600 text-white' : 'text-ink-600 hover:bg-ink-100'}`}>
               {item.label}
             </button>
           ))}
         </div>
       </Card>
 
+      {!editing && (
       <Card className="p-4 flex flex-col md:flex-row gap-3">
         <div className="flex items-center gap-2 flex-1">
           <Search size={16} className="text-ink-400" />
-          <input data-testid="academic-search" className="input !py-2" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="بحث..." />
+          <input data-testid="academic-search" className="input !py-3 !text-base" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="بحث..." />
         </div>
-        <button data-testid={`academic-add-${tab}`} className="btn-primary md:w-auto" onClick={() => open(tab)}><Plus size={16} /> إضافة</button>
+        <button data-testid={`academic-add-${tab}`} className="btn-primary md:w-auto !min-h-11 !px-5 !text-base" onClick={() => open(tab)}><Plus size={17} /> إضافة</button>
       </Card>
+      )}
 
-      {loading ? <div data-testid="academic-loading" className="flex justify-center py-16"><Loader2 size={24} className="animate-spin text-brand-600" /></div> : (
+      {!editing && (loading ? <div data-testid="academic-loading" className="flex justify-center py-16"><Loader2 size={24} className="animate-spin text-brand-600" /></div> : (
         <>
           {tab === 'years' && <Grid empty="لم تنشأ أعوام دراسية بعد." icon={<Calendar size={40} />}>{years.filter((row) => match([row.name])).map((row) => <Item key={row.id} testId={`academic-item-year-${row.id}`} title={row.name} meta={`${row.start_date} - ${row.end_date}`} active={row.is_active} badge={row.is_current ? 'الحالي' : undefined} onEdit={() => open('years', row as unknown as Record<string, unknown>)} onToggle={() => toggle('academic_years', row.id, row.is_active)} />)}</Grid>}
           {tab === 'stages' && <Grid empty="لم تنشأ مراحل تعليمية بعد." icon={<Layers3 size={40} />}>{stages.filter((row) => match([row.name, row.code])).map((row) => <Item key={row.id} testId={`academic-item-stage-${row.id}`} title={row.name} meta={row.code ?? 'بدون كود'} active={row.is_active} onEdit={() => open('stages', row as unknown as Record<string, unknown>)} onToggle={() => toggle('education_stages', row.id, row.is_active)} />)}</Grid>}
@@ -144,7 +148,7 @@ export function AcademicSetup() {
           {tab === 'gradeSubjects' && <Grid empty="اربط المواد بالصفوف حتى يرثها الطلاب." icon={<BookOpen size={40} />}>{gradeSubjects.filter((row) => match([names.subject.get(row.subject_id), names.grade.get(row.grade_level_id), names.year.get(row.academic_year_id)])).map((row) => <Item key={row.id} testId={`academic-item-grade-subject-${row.id}`} title={names.subject.get(row.subject_id) ?? 'مادة'} meta={`${names.year.get(row.academic_year_id) ?? ''} · ${names.grade.get(row.grade_level_id) ?? ''} · ${row.class_id ? names.class.get(row.class_id) : 'كل فصول الصف'} · ${row.is_required ? 'إجبارية' : 'اختيارية'}`} active={row.is_active} onEdit={() => open('gradeSubjects', row as unknown as Record<string, unknown>)} onToggle={() => toggle('grade_subjects', row.id, row.is_active)} />)}</Grid>}
           {tab === 'teachers' && <Grid empty="اربط المعلمين بالمواد والفصول." icon={<UserCheck size={40} />}>{subjectTeachers.filter((row) => match([names.teacher.get(row.teacher_id), names.subject.get(row.subject_id), names.class.get(row.class_id)])).map((row) => <Item key={row.id} testId={`academic-item-teacher-${row.id}`} title={names.teacher.get(row.teacher_id) ?? 'معلم'} meta={`${names.subject.get(row.subject_id) ?? ''} · ${names.class.get(row.class_id) ?? ''} · ${row.section_id ? names.section.get(row.section_id) : 'كل الشعب'}`} active={row.is_active} onEdit={() => open('teachers', row as unknown as Record<string, unknown>)} onToggle={() => toggle('subject_teachers', row.id, row.is_active)} />)}</Grid>}
         </>
-      )}
+      ))}
 
       {editing && (
         <AcademicEditor
@@ -264,13 +268,16 @@ function AcademicEditor({ kind, row, institutionId, years, stages, grades, branc
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-ink-950/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div data-testid={`academic-editor-${kind}`} className="card w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={(event) => event.stopPropagation()}>
-        <div className="sticky top-0 bg-white border-b border-ink-100 px-6 py-4 flex items-center justify-between">
-          <h3 className="font-display text-lg font-700 text-ink-900">{row?.id ? 'تعديل' : 'إضافة'} {tabs.find((item) => item.id === kind)?.label}</h3>
-          <button onClick={onClose} className="text-ink-400 hover:text-ink-700"><X size={20} /></button>
+    <div data-testid={`academic-editor-${kind}`} className="card w-full overflow-hidden">
+      <div className="border-b border-ink-100 bg-ink-50/60 px-6 py-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-600 text-brand-600">الإعداد الأكاديمي</p>
+          <h3 className="mt-1 font-display text-2xl font-700 text-ink-900">{row?.id ? 'تعديل' : 'إضافة'} {tabs.find((item) => item.id === kind)?.label}</h3>
+          <p className="mt-1 text-sm text-ink-500">أدخل البيانات المطلوبة ثم احفظها لتظهر في قائمة الإعدادات.</p>
         </div>
-        <div className="p-6 space-y-4">
+        <button onClick={onClose} className="btn-outline !min-h-10 !px-4 !py-2.5 !text-sm"><ArrowRight size={17} /> رجوع للقائمة</button>
+      </div>
+      <div className="p-6 md:p-8 space-y-5">
           {localError && <StateMessage tone="error" message={localError} />}
           {['years', 'stages', 'grades', 'classes', 'subjects'].includes(kind) && <Field testId="academic-field-name" label="الاسم" value={String(values.name)} onChange={(value) => set('name', value)} />}
           {['stages', 'grades', 'subjects'].includes(kind) && <Field testId="academic-field-code" label="الكود" value={String(values.code)} onChange={(value) => set('code', value)} dir="ltr" />}
@@ -282,11 +289,10 @@ function AcademicEditor({ kind, row, institutionId, years, stages, grades, branc
           {kind === 'gradeSubjects' && <CheckField testId="academic-check-required" label="مادة إجبارية" checked={Boolean(values.is_required)} onChange={(value) => set('is_required', value)} />}
           <CheckField testId="academic-check-active" label="نشط" checked={Boolean(values.is_active)} onChange={(value) => set('is_active', value)} />
           {kind === 'years' && <CheckField testId="academic-check-current" label="العام الحالي" checked={Boolean(values.is_current)} onChange={(value) => set('is_current', value)} />}
-        </div>
-        <div className="sticky bottom-0 bg-white border-t border-ink-100 px-6 py-4 flex justify-end gap-2">
-          <button data-testid="academic-cancel" onClick={onClose} className="btn-ghost">إلغاء</button>
-          <button data-testid="academic-save" onClick={save} disabled={saving} className="btn-primary disabled:opacity-60">{saving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} حفظ</button>
-        </div>
+      </div>
+      <div className="border-t border-ink-100 bg-ink-50/40 px-6 py-4 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+        <button data-testid="academic-cancel" onClick={onClose} className="btn-ghost !min-h-11 !px-5 !text-sm">إلغاء</button>
+        <button data-testid="academic-save" onClick={save} disabled={saving} className="btn-primary !min-h-11 !px-6 !text-sm disabled:opacity-60">{saving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />} حفظ البيانات</button>
       </div>
     </div>
   );
@@ -299,16 +305,16 @@ function Grid({ children, empty, icon }: { children: React.ReactNode; empty: str
 
 function Item({ title, meta, active, badge, onEdit, onToggle, testId }: { title: string; meta: string; active: boolean; badge?: string; onEdit: () => void; onToggle: () => void; testId: string }) {
   return (
-    <Card data-testid={testId} className="p-4 flex items-center gap-3">
+    <Card data-testid={testId} className="p-5 flex items-center gap-4">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <h3 className="font-700 text-ink-900 truncate">{title}</h3>
+          <h3 className="text-base font-700 text-ink-900 truncate">{title}</h3>
           {badge && <Badge tone="brand">{badge}</Badge>}
           <Badge tone={active ? 'accent' : 'neutral'}>{active ? 'نشط' : 'معطل'}</Badge>
         </div>
-        <p className="text-xs text-ink-500 mt-1 truncate">{meta}</p>
+        <p className="text-sm text-ink-500 mt-1 truncate">{meta}</p>
       </div>
-      <button data-testid={`${testId}-edit`} onClick={onEdit} className="btn-outline !py-2">تعديل</button>
+      <button data-testid={`${testId}-edit`} onClick={onEdit} className="btn-outline !min-h-10 !px-4 !py-2.5 !text-sm">تعديل</button>
       <button data-testid={`${testId}-toggle`} onClick={onToggle} className="btn-ghost !p-2">{active ? <ToggleRight className="text-accent-600" /> : <ToggleLeft />}</button>
     </Card>
   );

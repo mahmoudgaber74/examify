@@ -88,6 +88,7 @@ function signedClient(user) {
 async function expectOk(account, operation, promise) {
   const { data, error } = await promise;
   record(account, operation, 'success', error ? error.message : 'success', !error);
+  if (error) throw new Error(`${account} | ${operation} expected success but failed: ${error.message}`);
   return { data, error };
 }
 
@@ -164,29 +165,27 @@ async function main() {
 
   const questionResult = await expectOk(
     'School Admin A',
-    'create question in question bank',
-    clients.adminA.from('questions').insert({
-      institution_id: ids.instA,
-      subject_id: subjectId,
-      type: 'multiple_choice',
-      prompt: 'Canonical path question',
-      difficulty: 'medium',
-      points: 1,
-    }).select('id').single(),
+    'create question in question bank through atomic RPC',
+    clients.adminA.rpc('save_single_answer_question', {
+      p_question_id: null,
+      p_institution_id: ids.instA,
+      p_subject_id: subjectId,
+      p_type: 'multiple_choice',
+      p_prompt: 'Canonical path question',
+      p_difficulty: 'medium',
+      p_points: 1,
+      p_unit: null,
+      p_lesson: null,
+      p_explanation: null,
+      p_metadata: {},
+      p_options: [
+        { label: 'A', is_correct: true, sort_order: 0 },
+        { label: 'B', is_correct: false, sort_order: 1 },
+      ],
+    }),
   );
-  const questionId = questionResult.data.id;
-
-  const optionResult = await expectOk(
-    'School Admin A',
-    'create correct option',
-    clients.adminA.from('question_options').insert({
-      question_id: questionId,
-      label: 'A',
-      is_correct: true,
-      sort_order: 0,
-    }).select('id').single(),
-  );
-  const optionId = optionResult.data.id;
+  const questionId = questionResult.data.question_id;
+  const optionId = questionResult.data.options.find((option) => option.label === 'A').id;
 
   const examResult = await expectOk(
     'School Admin A',
@@ -326,12 +325,7 @@ async function main() {
   const attemptResult = await expectOk(
     'Student A',
     'start modern attempt',
-    clients.studentA.from('exam_attempts').insert({
-      exam_id: examId,
-      student_id: ids.studentA,
-      attempt_number: 1,
-      status: 'in_progress',
-    }).select('id').single(),
+    clients.studentA.rpc('start_exam_attempt', { p_exam_id: examId }),
   );
   const attemptId = attemptResult.data.id;
 
@@ -363,12 +357,7 @@ async function main() {
   const directAttemptResult = await expectOk(
     'Student B',
     'start directly assigned modern attempt',
-    clients.studentB.from('exam_attempts').insert({
-      exam_id: directExamId,
-      student_id: ids.studentB,
-      attempt_number: 1,
-      status: 'in_progress',
-    }).select('id').single(),
+    clients.studentB.rpc('start_exam_attempt', { p_exam_id: directExamId }),
   );
   const directAttemptId = directAttemptResult.data.id;
 
@@ -451,10 +440,10 @@ async function main() {
   `);
   record(
     'Database',
-    'objective-only atomic submit autogrades and publishes',
-    'approved:1.00:100.00:true',
+    'objective-only atomic submit autogrades without publishing',
+    'graded:1.00:100.00:false',
     submittedSummary,
-    submittedSummary === 'approved:1.00:100.00:true',
+    submittedSummary === 'graded:1.00:100.00:false',
   );
 
   await expectFailOrEmpty(
@@ -517,9 +506,9 @@ async function main() {
     !graderRead.error && graderRead.data.length === 1,
   );
 
-  await expectOk(
+  await expectFailOrEmpty(
     'Grader A',
-    'grade modern attempt inside institution A',
+    'cannot directly mutate canonical attempt score',
     clients.graderA.from('exam_attempts').update({
       status: 'graded',
       score: 1,
@@ -532,13 +521,8 @@ async function main() {
 
   await expectOk(
     'School Admin A',
-    'publish result from modern attempt',
-    clients.adminA.from('exam_attempts').update({
-      status: 'approved',
-      is_result_published: true,
-      approved_by: users.adminA.id,
-      approved_at: new Date().toISOString(),
-    }).eq('id', attemptId).select('id, status, is_result_published').single(),
+    'publish result from modern attempt through RPC',
+    clients.adminA.rpc('publish_exam_result', { p_attempt_id: attemptId }),
   );
 
   await expectFailOrEmpty(

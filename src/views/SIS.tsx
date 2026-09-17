@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Search, Loader2, AlertCircle, Users, Calendar, BookOpen, TrendingUp, Download, Upload, Check, X, Eye, Pencil, Archive, FileSpreadsheet, Building2 } from 'lucide-react';
+import { Plus, Search, Loader2, AlertCircle, Users, Calendar, BookOpen, TrendingUp, Download, Upload, Check, X, Eye, Pencil, Archive, FileSpreadsheet, Building2, ArrowRight } from 'lucide-react';
 import { Card, SectionHeader, Badge, EmptyState, ProgressBar } from '../components/ui';
+import { Select as DropdownSelect } from '../components/ui/Select';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
 import type { UserRole } from '../lib/auth';
-import * as XLSX from 'xlsx';
+import { useFeedback } from '../components/FeedbackProvider';
 
 type Tab = 'students' | 'structure' | 'attendance' | 'grades' | 'subjects';
 type StudentStatus = 'active' | 'suspended' | 'graduated' | 'archived';
@@ -204,20 +205,13 @@ export function SIS() {
         </div>
       )}
 
-      <div className="flex gap-1 p-1 rounded-xl bg-ink-100">
+      <div className={`grid grid-cols-2 gap-1.5 rounded-2xl border border-ink-100 bg-ink-100/80 p-1.5 shadow-sm ${canManageStructure ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}>
         <TabBtn tab="students" current={tab} onClick={setTab} icon={<Users size={16} />} label="الطلاب" />
         <TabBtn tab="attendance" current={tab} onClick={setTab} icon={<Calendar size={16} />} label="الحضور والغياب" />
         <TabBtn tab="grades" current={tab} onClick={setTab} icon={<TrendingUp size={16} />} label="الدرجات" />
         {canManageSubjects && <TabBtn tab="subjects" current={tab} onClick={setTab} icon={<BookOpen size={16} />} label="المواد" />}
+        {canManageStructure && <TabBtn tab="structure" current={tab} onClick={setTab} icon={<Building2 size={16} />} label="الهيكل الأكاديمي" />}
       </div>
-
-      {canManageStructure && (
-        <div className="flex">
-          <button data-testid="sis-tab-structure" onClick={() => setTab('structure')} className={`btn-outline ${tab === 'structure' ? 'bg-white shadow-sm text-ink-900' : ''}`}>
-            <Building2 size={16} /> الهيكل الأكاديمي
-          </button>
-        </div>
-      )}
 
       {tab === 'structure' && canManageStructure && (
         <AcademicStructureTab
@@ -262,7 +256,7 @@ export function SIS() {
 }
 
 function TabBtn({ tab, current, onClick, icon, label }: { tab: Tab; current: Tab; onClick: (t: Tab) => void; icon: React.ReactNode; label: string }) {
-  return <button data-testid={`sis-tab-${tab}`} onClick={() => onClick(tab)} className={`flex-1 py-2.5 rounded-lg text-sm font-600 flex items-center justify-center gap-2 ${current === tab ? 'bg-white shadow-sm' : 'text-ink-500'}`}>{icon} {label}</button>;
+  return <button data-testid={`sis-tab-${tab}`} onClick={() => onClick(tab)} className={`flex min-h-11 min-w-0 items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-center text-sm font-600 transition ${current === tab ? 'bg-white text-brand-700 shadow-sm ring-1 ring-ink-100' : 'text-ink-500 hover:bg-white/70 hover:text-ink-800'}`}><span className="shrink-0">{icon}</span><span className="truncate">{label}</span></button>;
 }
 
 type StructureKind = 'branch' | 'grade' | 'class' | 'section';
@@ -282,6 +276,7 @@ function AcademicStructureTab({
   sections: SectionRow[];
   onUpdated: () => void;
 }) {
+  const { confirm } = useFeedback();
   const [editing, setEditing] = useState<{ kind: StructureKind; id?: string } | null>(null);
   const [form, setForm] = useState({
     name: '',
@@ -403,7 +398,7 @@ function AcademicStructureTab({
 
   async function toggle(kind: StructureKind, id: string, active: boolean) {
     const next = !active;
-    if (!next && !confirm('سيتم تعطيل السجل للعمليات الجديدة مع بقاء السجلات التاريخية ظاهرة. هل تريد المتابعة؟')) return;
+    if (!next && !(await confirm('سيتم تعطيل السجل للعمليات الجديدة مع بقاء السجلات التاريخية ظاهرة. هل تريد المتابعة؟', { title: 'تعطيل السجل', confirmLabel: 'تعطيل السجل' }))) return;
     const table = kind === 'branch' ? 'branches' : kind === 'grade' ? 'grade_levels' : kind === 'class' ? 'classes' : 'sections';
     const { error: updateError } = await supabase.from(table).update({ is_active: next }).eq('id', id);
     if (updateError) {
@@ -587,6 +582,7 @@ function SubjectsTab({
   loading: boolean;
   onUpdated: () => void;
 }) {
+  const { confirm } = useFeedback();
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [editing, setEditing] = useState<SubjectRow | null>(null);
@@ -611,7 +607,7 @@ function SubjectsTab({
 
   async function toggleSubject(subject: SubjectRow) {
     const nextActive = !subject.is_active;
-    if (!nextActive && !confirm(`هل تريد تعطيل مادة "${subject.name}"؟ ستظل السجلات السابقة مرتبطة بها.`)) return;
+    if (!nextActive && !(await confirm(`هل تريد تعطيل مادة "${subject.name}"؟ ستظل السجلات السابقة مرتبطة بها.`, { title: 'تعطيل المادة', confirmLabel: 'تعطيل المادة' }))) return;
     setError(null);
     const { error: err } = await supabase
       .from('subjects')
@@ -651,18 +647,26 @@ function SubjectsTab({
       )}
       {error && <FormError message={error} />}
 
-      <Card className="p-4">
-        <div className="flex flex-col lg:flex-row gap-3">
-          <div className="flex items-center gap-2 flex-1">
-            <Search size={16} className="text-ink-400" />
-            <input className="input !py-2" placeholder="ابحث باسم المادة أو الكود" value={query} onChange={(e) => setQuery(e.target.value)} />
-          </div>
-          <select className="input !py-2 lg:!w-48" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as 'all' | 'active' | 'inactive')}>
-            <option value="all">جميع الحالات</option>
-            <option value="active">المواد النشطة</option>
-            <option value="inactive">المواد المعطلة</option>
-          </select>
-          <button onClick={openCreate} className="btn-primary lg:w-auto"><Plus size={16} /> إضافة مادة</button>
+      <Card className="space-y-4 p-4 sm:p-5">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:items-end">
+          <label className="min-w-0 space-y-1.5">
+            <span className="label mb-0">البحث</span>
+            <div className="flex items-center gap-2">
+              <Search size={16} className="shrink-0 text-ink-400" />
+              <input className="input h-12 w-full !py-0" placeholder="ابحث باسم المادة أو الكود" value={query} onChange={(e) => setQuery(e.target.value)} />
+            </div>
+          </label>
+          <label className="space-y-1.5">
+            <span className="label mb-0">حالة المادة</span>
+            <DropdownSelect
+              value={statusFilter}
+              onValueChange={(value) => setStatusFilter(value as 'all' | 'active' | 'inactive')}
+              options={[{ value: 'all', label: 'جميع الحالات' }, { value: 'active', label: 'المواد النشطة' }, { value: 'inactive', label: 'المواد المعطلة' }]}
+              ariaLabel="حالة المادة"
+              testId="subject-status-filter"
+            />
+          </label>
+          <button onClick={openCreate} className="btn-primary h-12 w-full"><Plus size={16} /> إضافة مادة</button>
         </div>
       </Card>
 
@@ -874,6 +878,7 @@ function StudentsTab({
   canManageStudents: boolean;
   onUpdated: () => void;
 }) {
+  const { confirm, toast } = useFeedback();
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | StudentStatus>('all');
   const [branchFilter, setBranchFilter] = useState('');
@@ -936,7 +941,7 @@ function StudentsTab({
   }
 
   async function archiveStudent(student: StudentRow) {
-    if (!confirm(`هل تريد أرشفة الطالب "${student.full_name}"؟`)) return;
+    if (!(await confirm(`هل تريد أرشفة الطالب "${student.full_name}"؟`, { title: 'أرشفة الطالب', confirmLabel: 'أرشفة الطالب' }))) return;
     let { error } = await supabase.from('student_profiles').update({
       status: 'archived',
       is_active: false,
@@ -951,7 +956,7 @@ function StudentsTab({
       setSuccess('تمت أرشفة الطالب بنجاح.');
       onUpdated();
     } else {
-      alert(formatStudentError(error.message));
+      toast(formatStudentError(error.message), 'error');
     }
   }
 
@@ -971,75 +976,36 @@ function StudentsTab({
       setSuccess(nextActive ? 'تمت إعادة تفعيل الطالب بنجاح.' : 'تم تعطيل حساب الطالب بنجاح.');
       onUpdated();
     } else {
-      alert(formatStudentError(error.message));
+      toast(formatStudentError(error.message), 'error');
     }
   }
 
   function exportRows(format: 'xlsx' | 'csv') {
+    if (format === 'xlsx') {
+      setSuccess('Excel export is unavailable. Use CSV export.');
+      return;
+    }
     const rows = filtered.map((student) => {
       const classLink = studentClassById.get(student.id);
       const classRow = classLink ? classById.get(classLink.class_id) : null;
-      return {
-        'اسم الطالب': student.full_name,
-        'الاسم بالإنجليزية': student.full_name_en ?? '',
-        'رقم القيد': student.student_code ?? '',
-        'رقم الجلوس': student.seat_number ?? '',
-        'الهاتف': student.phone ?? '',
-        'البريد الإلكتروني': student.email ?? '',
-        'الحالة': student.status ? statusLabels[student.status] : '',
-        'المرحلة': student.grade_level_id ? gradeById.get(student.grade_level_id)?.name ?? '' : '',
-        'الفصل': classRow?.name ?? '',
-        'الشعبة': classLink?.section_id ? sectionById.get(classLink.section_id)?.name ?? '' : '',
-      };
+      return [student.full_name, student.full_name_en ?? '', student.student_code ?? '', student.seat_number ?? '', student.phone ?? '', student.email ?? '', student.status ? statusLabels[student.status] : '', student.grade_level_id ? gradeById.get(student.grade_level_id)?.name ?? '' : '', classRow?.name ?? '', classLink?.section_id ? sectionById.get(classLink.section_id)?.name ?? '' : ''];
     });
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'الطلاب');
-    XLSX.writeFile(wb, format === 'xlsx' ? 'students-export.xlsx' : 'students-export.csv', { bookType: format });
+    const csv = [['Name', 'English name', 'Student code', 'Seat number', 'Phone', 'Email', 'Status', 'Grade', 'Class', 'Section'], ...rows]
+      .map((row) => row.map((value) => '"' + String(value).replace(/"/g, '""') + '"').join(',')).join('\n');
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    link.download = 'students-export.csv';
+    link.click();
+    URL.revokeObjectURL(link.href);
   }
 
   function downloadTemplate() {
-    const ws = XLSX.utils.json_to_sheet([
-      {
-        first_name: 'Ahmed',
-        father_name: 'Mohamed',
-        family_name: 'Ali',
-        full_name: 'Ahmed Mohamed Ali',
-        full_name_en: 'Ahmed Mohamed Ali',
-        student_code: 'ST-001',
-        seat_number: '1001',
-        gender: 'male',
-        birth_date: '2012-09-01',
-        email: 'student@example.com',
-        phone: '+201000000000',
-      },
-    ]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'نموذج الطلاب');
-    XLSX.writeFile(wb, 'students-import-template.xlsx');
+    setSuccess('Excel template download is unavailable. Use the individual student form or CSV export.');
   }
 
-  async function handleImportFile(file: File) {
-    const buffer = await file.arrayBuffer();
-    const wb = XLSX.read(buffer);
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws, { defval: '' });
-    const mapped = rows.map((row) => ({
-      ...emptyStudentForm,
-      firstName: String(row.first_name ?? ''),
-      fatherName: String(row.father_name ?? ''),
-      familyName: String(row.family_name ?? ''),
-      fullName: String(row.full_name ?? ''),
-      fullNameEn: String(row.full_name_en ?? ''),
-      studentCode: String(row.student_code ?? ''),
-      seatNumber: String(row.seat_number ?? ''),
-      gender: normalizeGender(String(row.gender ?? '')),
-      birthDate: String(row.birth_date ?? ''),
-      email: String(row.email ?? ''),
-      phone: String(row.phone ?? ''),
-      status: 'active' as StudentStatus,
-    }));
-    setImportRows(mapped);
+  async function handleImportFile(_file: File) {
+    void _file;
+    setSuccess('Excel import is unavailable. No file was processed.');
   }
 
   async function saveImportRows() {
@@ -1062,6 +1028,30 @@ function StudentsTab({
 
   if (loading) return <div className="flex justify-center py-16"><Loader2 size={24} className="animate-spin text-brand-600" /></div>;
 
+  if (modalMode) {
+    return (
+      <StudentFormPage
+        mode={modalMode}
+        student={activeStudent}
+        institutionId={institutionId}
+        actorId={actorId}
+        role={role}
+        existingStudents={students}
+        classes={classes}
+        gradeLevels={gradeLevels}
+        branches={branches}
+        sections={sections}
+        classLink={activeStudent ? studentClassById.get(activeStudent.id) ?? null : null}
+        onClose={() => setModalMode(null)}
+        onSaved={(message) => {
+          setModalMode(null);
+          setSuccess(message);
+          onUpdated();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="space-y-4">
       {success && (
@@ -1072,9 +1062,9 @@ function StudentsTab({
         </div>
       )}
 
-      <Card className="p-4 space-y-3">
-        <div className="flex flex-col lg:flex-row gap-3">
-          <div className="flex items-center gap-2 flex-1">
+      <Card className="space-y-4 p-4 sm:p-5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             <Search size={16} className="text-ink-400" />
             <input className="input !py-2" placeholder="ابحث باسم الطالب أو رقم القيد أو رقم الجلوس أو الهاتف" value={query} onChange={(e) => { setQuery(e.target.value); setPage(1); }} />
           </div>
@@ -1083,30 +1073,54 @@ function StudentsTab({
           )}
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-          <select className="input !py-2" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as 'all' | StudentStatus)}>
-            <option value="all">جميع الحالات</option>
-            {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select>
-          <select className="input !py-2" value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
-            <option value="">جميع الفروع</option>
-            {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
-          </select>
-          <select className="input !py-2" value={gradeFilter} onChange={(e) => setGradeFilter(e.target.value)}>
-            <option value="">جميع الصفوف</option>
-            {gradeLevels.map((grade) => <option key={grade.id} value={grade.id}>{grade.name}</option>)}
-          </select>
-          <select className="input !py-2" value={classFilter} onChange={(e) => setClassFilter(e.target.value)}>
-            <option value="">جميع الفصول</option>
-            {classes.map((classRow) => <option key={classRow.id} value={classRow.id}>{classRow.name}</option>)}
-          </select>
-          <div className="flex gap-2">
-            <button onClick={() => exportRows('xlsx')} className="btn-outline flex-1"><Download size={16} /> تصدير XLSX</button>
-            <button onClick={() => exportRows('csv')} className="btn-outline flex-1">تصدير CSV</button>
-          </div>
+        <div className="grid grid-cols-1 gap-3 border-t border-ink-100 pt-4 sm:grid-cols-2 lg:grid-cols-4">
+          <label className="space-y-1.5">
+            <span className="label mb-0">الحالة</span>
+            <DropdownSelect
+              value={statusFilter}
+              onValueChange={(value) => { setStatusFilter(value as 'all' | StudentStatus); setPage(1); }}
+              options={[{ value: 'all', label: 'جميع الحالات' }, ...Object.entries(statusLabels).map(([value, label]) => ({ value, label }))]}
+              ariaLabel="حالة الطالب"
+              testId="student-status-filter"
+            />
+          </label>
+          <label className="space-y-1.5">
+            <span className="label mb-0">الفرع</span>
+            <DropdownSelect
+              value={branchFilter}
+              onValueChange={(value) => { setBranchFilter(value); setPage(1); }}
+              options={[{ value: '', label: 'جميع الفروع' }, ...branches.map((branch) => ({ value: branch.id, label: branch.name }))]}
+              ariaLabel="فرع الطالب"
+              testId="student-branch-filter"
+            />
+          </label>
+          <label className="space-y-1.5">
+            <span className="label mb-0">الصف</span>
+            <DropdownSelect
+              value={gradeFilter}
+              onValueChange={(value) => { setGradeFilter(value); setPage(1); }}
+              options={[{ value: '', label: 'جميع الصفوف' }, ...gradeLevels.map((grade) => ({ value: grade.id, label: grade.name }))]}
+              ariaLabel="صف الطالب"
+              testId="student-grade-filter"
+            />
+          </label>
+          <label className="space-y-1.5">
+            <span className="label mb-0">الفصل</span>
+            <DropdownSelect
+              value={classFilter}
+              onValueChange={(value) => { setClassFilter(value); setPage(1); }}
+              options={[{ value: '', label: 'جميع الفصول' }, ...classes.map((classRow) => ({ value: classRow.id, label: classRow.name }))]}
+              ariaLabel="فصل الطالب"
+              testId="student-class-filter"
+            />
+          </label>
         </div>
 
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-col gap-3 border-t border-ink-100 pt-4 sm:flex-row sm:flex-wrap sm:items-center">
+          <div className="flex flex-wrap gap-2 sm:mr-auto">
+            <button onClick={() => exportRows('xlsx')} className="btn-outline"><Download size={16} /> تصدير XLSX</button>
+            <button onClick={() => exportRows('csv')} className="btn-outline">تصدير CSV</button>
+          </div>
           <button onClick={downloadTemplate} className="btn-outline"><FileSpreadsheet size={16} /> تنزيل نموذج الاستيراد</button>
           {canManageStudents && (
             <label className="btn-outline cursor-pointer">
@@ -1183,28 +1197,6 @@ function StudentsTab({
         </div>
       </div>
 
-      {modalMode && (
-        <StudentModal
-          mode={modalMode}
-          student={activeStudent}
-          institutionId={institutionId}
-          actorId={actorId}
-          role={role}
-          existingStudents={students}
-          classes={classes}
-          gradeLevels={gradeLevels}
-          branches={branches}
-          sections={sections}
-          classLink={activeStudent ? studentClassById.get(activeStudent.id) ?? null : null}
-          onClose={() => setModalMode(null)}
-          onSaved={(message) => {
-            setModalMode(null);
-            setSuccess(message);
-            onUpdated();
-          }}
-        />
-      )}
-
       {importRows && (
         <ImportPreviewModal
           rows={importRows}
@@ -1217,7 +1209,7 @@ function StudentsTab({
   );
 }
 
-function StudentModal({
+function StudentFormPage({
   mode,
   student,
   institutionId,
@@ -1316,17 +1308,21 @@ function StudentModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-ink-950/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div className="card w-full max-w-5xl max-h-[92vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-        <div className="sticky top-0 bg-white border-b border-ink-100 px-6 py-4 flex items-center justify-between z-10">
-          <div>
-            <h3 className="font-display text-lg font-700 text-ink-900">{mode === 'add' ? 'إضافة طالب جديد' : mode === 'edit' ? 'تعديل بيانات الطالب' : 'بيانات الطالب'}</h3>
-            <p className="text-xs text-ink-400">أدخل بيانات الطالب الأساسية وحدد الصف والفصل الدراسي.</p>
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <button onClick={onClose} className="btn-outline shrink-0"><ArrowRight size={16} /> العودة إلى الطلاب</button>
+          <div className="hidden h-9 w-px bg-ink-200 sm:block" />
+          <div className="min-w-0">
+            <h3 className="truncate font-display text-xl font-700 text-ink-900">{mode === 'add' ? 'إضافة طالب جديد' : mode === 'edit' ? 'تعديل بيانات الطالب' : 'بيانات الطالب'}</h3>
+            <p className="mt-1 text-sm text-ink-500">أدخل البيانات على مراحل واحفظها بسهولة داخل ملف الطالب.</p>
           </div>
-          <button onClick={onClose} className="text-ink-400 hover:text-ink-700" aria-label="إغلاق"><X size={20} /></button>
         </div>
+        <Badge tone={readonly ? 'neutral' : mode === 'edit' ? 'warning' : 'accent'}>{readonly ? 'عرض البيانات' : mode === 'edit' ? 'تعديل' : 'طالب جديد'}</Badge>
+      </div>
 
-        <div className="p-6 space-y-5">
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_18rem]">
+        <div className="min-w-0 space-y-5">
           {errors.form && <FormError message={errors.form} />}
 
           <FormSection title="البيانات الأساسية">
@@ -1360,7 +1356,24 @@ function StudentModal({
           </FormSection>
         </div>
 
-        <div className="sticky bottom-0 bg-white border-t border-ink-100 px-6 py-4 flex justify-end gap-2">
+        <aside className="card hidden h-fit space-y-5 p-5 xl:sticky xl:top-5 xl:block">
+          <div className="flex items-start gap-3">
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-50 text-brand-600"><Users size={19} /></div>
+            <div>
+              <h4 className="font-700 text-ink-900">ملف الطالب</h4>
+              <p className="mt-1 text-xs leading-5 text-ink-500">راجع البيانات قبل الحفظ لضمان ظهور الطالب بشكل صحيح في التقارير.</p>
+            </div>
+          </div>
+          <div className="space-y-3 border-t border-ink-100 pt-4 text-sm">
+            <div className="flex items-center gap-2 text-ink-700"><span className="grid h-6 w-6 place-items-center rounded-full bg-brand-600 text-xs font-700 text-white">1</span> البيانات الأساسية</div>
+            <div className="flex items-center gap-2 text-ink-700"><span className="grid h-6 w-6 place-items-center rounded-full bg-brand-100 text-xs font-700 text-brand-700">2</span> البيانات الدراسية</div>
+            <div className="flex items-center gap-2 text-ink-700"><span className="grid h-6 w-6 place-items-center rounded-full bg-brand-100 text-xs font-700 text-brand-700">3</span> بيانات ولي الأمر</div>
+          </div>
+          <div className="rounded-xl bg-ink-50 p-3 text-xs leading-5 text-ink-500">الحقول التي تحمل علامة (*) مطلوبة لإتمام الحفظ.</div>
+        </aside>
+      </div>
+
+      <div className="sticky bottom-4 z-20 flex flex-col gap-3 rounded-2xl border border-ink-100 bg-white/95 p-3 shadow-pop backdrop-blur sm:flex-row sm:items-center sm:justify-end">
           <button onClick={onClose} className="btn-ghost">إلغاء</button>
           {!readonly && (
             <>
@@ -1371,7 +1384,6 @@ function StudentModal({
               </button>
             </>
           )}
-        </div>
       </div>
     </div>
   );
@@ -1379,9 +1391,12 @@ function StudentModal({
 
 function FormSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section>
-      <h4 className="font-700 text-ink-900 mb-3">{title}</h4>
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">{children}</div>
+    <section className="card space-y-4 p-5 sm:p-6">
+      <div className="flex items-center gap-3 border-b border-ink-100 pb-4">
+        <span className="h-6 w-1 rounded-full bg-brand-600" />
+        <h4 className="font-700 text-ink-900">{title}</h4>
+      </div>
+      <div className="grid gap-x-5 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
     </section>
   );
 }
@@ -1398,12 +1413,17 @@ function TextField({ label, value, onChange, error, disabled, required, type = '
 
 function SelectField({ label, value, onChange, options, disabled, testId }: { label: string; value: string; onChange: (value: string) => void; options: [string, string][]; disabled?: boolean; testId?: string }) {
   return (
-    <div>
-      <label className="label">{label}</label>
-      <select data-testid={testId} className="input" value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
-        {options.map(([optionValue, labelText]) => <option key={optionValue} value={optionValue}>{labelText}</option>)}
-      </select>
-    </div>
+    <label className="space-y-1.5">
+      <span className="label mb-0">{label}</span>
+      <DropdownSelect
+        value={value}
+        onValueChange={onChange}
+        options={options.map(([optionValue, labelText]) => ({ value: optionValue, label: labelText }))}
+        disabled={disabled}
+        ariaLabel={label}
+        testId={testId}
+      />
+    </label>
   );
 }
 
@@ -1553,14 +1573,6 @@ function validateStudent(values: StudentFormValues, existingStudents: StudentRow
     if (duplicate) errors.studentCode = 'رقم القيد مستخدم لطالب آخر.';
   }
   return { valid: Object.keys(errors).length === 0, errors };
-}
-
-function normalizeGender(value: string): StudentFormValues['gender'] {
-  const normalized = value.trim().toLowerCase();
-  if (['male', 'm'].includes(normalized)) return 'male';
-  if (['female', 'f'].includes(normalized)) return 'female';
-  if (normalized === 'other') return 'other';
-  return '';
 }
 
 async function saveStudentRecord({
@@ -1717,11 +1729,11 @@ function AttendanceTab({ institutionId, students, classStudents, classes, subjec
 
   return (
     <div className="space-y-4">
-      <Card className="p-4">
-        <div className="flex flex-wrap gap-3 items-end">
-          <div><label className="label">التاريخ</label><input type="date" className="input !w-auto" value={date} onChange={(e) => setDate(e.target.value)} /></div>
-          <div><label className="label">المادة</label><select className="input !w-auto" value={subjectId} onChange={(e) => setSubjectId(e.target.value)}><option value="">حضور عام</option>{subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
-          {canEdit && <button onClick={save} disabled={saving} className="btn-primary disabled:opacity-60">{saving ? <Loader2 size={16} className="animate-spin" /> : saved ? <Check size={16} /> : <Upload size={16} />}{saving ? 'جارٍ الحفظ' : saved ? 'تم الحفظ' : 'حفظ الحضور'}</button>}
+      <Card className="p-4 sm:p-5">
+        <div className={`grid grid-cols-1 gap-3 ${canEdit ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
+          <label className="space-y-1.5"><span className="label mb-0">التاريخ</span><input type="date" className="input h-12 w-full !py-0" value={date} onChange={(e) => setDate(e.target.value)} /></label>
+          <label className="space-y-1.5"><span className="label mb-0">المادة</span><DropdownSelect value={subjectId} onValueChange={setSubjectId} options={[{ value: '', label: 'حضور عام' }, ...subjects.map((s) => ({ value: s.id, label: s.name }))]} ariaLabel="مادة الحضور" testId="attendance-subject-filter" /></label>
+          {canEdit && <button onClick={save} disabled={saving} className="btn-primary h-12 w-full self-end disabled:opacity-60">{saving ? <Loader2 size={16} className="animate-spin" /> : saved ? <Check size={16} /> : <Upload size={16} />}{saving ? 'جارٍ الحفظ' : saved ? 'تم الحفظ' : 'حفظ الحضور'}</button>}
         </div>
       </Card>
 
@@ -1758,6 +1770,7 @@ function GradesTab({ institutionId, students, classStudents, classes, subjects, 
   const [grades, setGrades] = useState<GradeBookRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!institutionId) return;
@@ -1772,36 +1785,20 @@ function GradesTab({ institutionId, students, classStudents, classes, subjects, 
   useEffect(() => { load(); }, [load]);
 
   function exportExcel() {
-    const rows = grades.map((g) => {
-      const student = students.find((s) => s.id === g.student_id);
-      return {
-        'الطالب': student?.full_name ?? '',
-        'المادة': g.subjects?.name ?? '',
-        'التقييم': g.assessment_title,
-        'الدرجة': g.score,
-        'الدرجة النهائية': g.max_score,
-        'النسبة': `${((g.score / g.max_score) * 100).toFixed(1)}%`,
-      };
-    });
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'الدرجات');
-    XLSX.writeFile(wb, `gradebook-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    setNotice('Excel export is unavailable. No spreadsheet file was generated.');
   }
 
   return (
     <div className="space-y-4">
-      <Card className="p-4 flex items-center gap-3">
-        <BookOpen size={16} className="text-ink-400" />
-        <select className="input !w-auto" value={subjectId} onChange={(e) => setSubjectId(e.target.value)}>
-          <option value="">جميع المواد</option>
-          {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
+      <Card className="flex flex-col gap-3 p-4 sm:flex-row sm:items-end sm:p-5">
+        <BookOpen size={18} className="mb-3 hidden text-ink-400 sm:block" />
+        <label className="space-y-1.5 sm:w-64"><span className="label mb-0">المادة</span><DropdownSelect value={subjectId} onValueChange={setSubjectId} options={[{ value: '', label: 'جميع المواد' }, ...subjects.map((s) => ({ value: s.id, label: s.name }))]} ariaLabel="فلترة الدرجات حسب المادة" testId="grades-subject-filter" /></label>
         <div className="mr-auto flex gap-2">
-          <button onClick={exportExcel} className="btn-outline"><Download size={16} /> تصدير Excel</button>
-          {canEdit && <button onClick={() => setShowAdd(true)} className="btn-primary"><Plus size={16} /> إضافة درجة</button>}
+          <button onClick={exportExcel} className="btn-outline h-12"><Download size={16} /> تصدير Excel</button>
+          {canEdit && <button onClick={() => setShowAdd(true)} className="btn-primary h-12"><Plus size={16} /> إضافة درجة</button>}
         </div>
       </Card>
+      {notice && <div className="rounded-xl border border-warning-200 bg-warning-50 p-3 text-sm text-warning-800">{notice}</div>}
 
       {loading ? <div className="flex justify-center py-16"><Loader2 size={24} className="animate-spin text-brand-600" /></div> :
         grades.length === 0 ? <Card><EmptyState icon={<TrendingUp size={40} />} title="لا توجد درجات" /></Card> :
@@ -1862,8 +1859,8 @@ function AddGradeModal({ institutionId, students, classStudents, classes, subjec
         <div className="border-b border-ink-100 px-6 py-4 flex items-center justify-between"><h3 className="font-display text-lg font-700 text-ink-900">إضافة درجة</h3><button onClick={onClose} className="text-ink-400 text-xl" aria-label="إغلاق">×</button></div>
         <div className="p-6 space-y-4">
           {error && <FormError message={error} />}
-          <div><label className="label">الطالب</label><select className="input" value={studentId} onChange={(e) => setStudentId(e.target.value)}><option value="">اختر الطالب</option>{students.map((s) => <option key={s.id} value={s.id}>{s.full_name}</option>)}</select></div>
-          <div><label className="label">المادة</label><select className="input" value={subjectId} onChange={(e) => setSubjectId(e.target.value)}><option value="">اختر المادة</option>{subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
+          <label className="space-y-1.5"><span className="label mb-0">الطالب</span><DropdownSelect value={studentId} onValueChange={setStudentId} options={[{ value: '', label: 'اختر الطالب' }, ...students.map((s) => ({ value: s.id, label: s.full_name }))]} ariaLabel="الطالب" testId="grade-student-select" /></label>
+          <label className="space-y-1.5"><span className="label mb-0">المادة</span><DropdownSelect value={subjectId} onValueChange={setSubjectId} options={[{ value: '', label: 'اختر المادة' }, ...subjects.map((s) => ({ value: s.id, label: s.name }))]} ariaLabel="المادة" testId="grade-subject-select" /></label>
           <div><label className="label">اسم التقييم</label><input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="مثال: اختبار الشهر" /></div>
           <div className="grid grid-cols-2 gap-4"><div><label className="label">الدرجة</label><input type="number" step="any" className="input" value={score} onChange={(e) => setScore(e.target.value)} /></div><div><label className="label">الدرجة النهائية</label><input type="number" className="input" value={maxScore} onChange={(e) => setMaxScore(e.target.value)} /></div></div>
         </div>

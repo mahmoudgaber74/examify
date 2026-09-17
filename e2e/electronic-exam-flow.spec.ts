@@ -51,7 +51,6 @@ async function createPublishedExam(page: Page, title: string, mcqPrompt: string,
   await addBankQuestionToExam(page, mcqPrompt);
   await addBankQuestionToExam(page, essayPrompt);
 
-  page.once('dialog', (dialog) => dialog.accept());
   await page.getByTestId('exam-assign-class').click();
   await page.getByTestId('exam-editor-done').click();
   await expect(page.getByText(title).first()).toBeVisible({ timeout: 20_000 });

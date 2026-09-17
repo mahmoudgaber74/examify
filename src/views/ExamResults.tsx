@@ -5,6 +5,7 @@ import { supabase, useAuthSafe } from '../lib/auth-helpers';
 
 interface AttemptWithDetails {
   id: string;
+  student_id: string;
   status: string;
   score: number | null;
   score_percentage: number | null;
@@ -63,14 +64,14 @@ export function ExamResults() {
       if (!student) { setError('لم يتم العثور على ملف الطالب'); setLoading(false); return; }
       query = supabase
         .from('exam_attempts')
-        .select('id, status, score, score_percentage, is_passed, is_result_published, submitted_at, graded_at, approved_at, examify_exams!inner(id, title, total_points, passing_score, show_correct_answers)')
+        .select('id, student_id, status, score, score_percentage, is_passed, is_result_published, submitted_at, graded_at, approved_at, examify_exams!inner(id, title, total_points, passing_score, show_correct_answers)')
         .eq('student_id', (student as { id: string }).id)
         .eq('examify_exams.institution_id', institutionId)
         .order('submitted_at', { ascending: false });
     } else {
       query = supabase
         .from('exam_attempts')
-        .select('id, status, score, score_percentage, is_passed, is_result_published, submitted_at, graded_at, approved_at, examify_exams!inner(id, title, total_points, passing_score, show_correct_answers)')
+        .select('id, student_id, status, score, score_percentage, is_passed, is_result_published, submitted_at, graded_at, approved_at, examify_exams!inner(id, title, total_points, passing_score, show_correct_answers)')
         .eq('examify_exams.institution_id', institutionId)
         .in('status', ['submitted', 'auto_submitted', 'graded', 'approved'])
         .order('submitted_at', { ascending: false });
@@ -105,9 +106,11 @@ export function ExamResults() {
   }
 
   async function publishResult(attemptId: string) {
-    const { error: err } = await supabase.from('exam_attempts')
-      .update({ is_result_published: true, status: 'approved', approved_at: new Date().toISOString() })
-      .eq('id', attemptId);
+    const attempt = attempts.find((item) => item.id === attemptId);
+    if (!attempt) return;
+    const { error: err } = await supabase.rpc('publish_exam_result', {
+      p_attempt_id: attemptId,
+    });
     if (err) { setError(err.message); return; }
     setAttempts((prev) => prev.map((a) => a.id === attemptId ? { ...a, is_result_published: true, status: 'approved' } : a));
   }

@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Loader2, AlertCircle, TrendingUp, Award, Users, BarChart3, Download, FileSpreadsheet } from 'lucide-react';
 import { Card, SectionHeader, EmptyState, ProgressBar } from '../components/ui';
+import { Select as DropdownSelect } from '../components/ui/Select';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
-import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import { ar, getArabicErrorMessage } from '../lib/translate';
+import { exportResultsWorkbook, type ReportExportAnswer } from '../lib/report-export';
 
 interface ReportExam {
   id: string;
@@ -24,6 +25,55 @@ interface AttemptForReport {
   is_result_published: boolean;
   status: string;
   examify_exams: ReportExam;
+  student_profiles?: { full_name: string; student_code: string | null; phone: string | null } | null;
+}
+
+interface ReportBranding {
+  name: string;
+  brandName: string;
+  primaryColor: string;
+  logoUrl: string | null;
+  address: string;
+  phone: string;
+}
+
+function hexToRgb(value: string): readonly [number, number, number] {
+  const normalized = value.replace('#', '').trim();
+  const hex = normalized.length === 3 ? normalized.split('').map((part) => `${part}${part}`).join('') : normalized;
+  if (!/^[0-9a-f]{6}$/i.test(hex)) return [13, 148, 136];
+  return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+}
+
+async function imageUrlToDataUrl(url: string | null) {
+  if (!url || url.startsWith('data:')) return url;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const blob = await response.blob();
+    return await new Promise<string | null>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const result = typeof reader.result === 'string' ? reader.result : null;
+        if (!result || !result.startsWith('data:image/svg+xml')) { resolve(result); return; }
+        const image = new Image();
+        image.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = image.naturalWidth || 512;
+          canvas.height = image.naturalHeight || 512;
+          const context = canvas.getContext('2d');
+          if (!context) { resolve(null); return; }
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          resolve(canvas.toDataURL('image/png'));
+        };
+        image.onerror = () => resolve(null);
+        image.src = result;
+      };
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return null;
+  }
 }
 
 export function Reports() {
@@ -37,6 +87,9 @@ export function Reports() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [exams, setExams] = useState<ReportExam[]>([]);
+  const [exporting, setExporting] = useState(false);
+  const [reportAnswers, setReportAnswers] = useState<ReportExportAnswer[]>([]);
+  const [reportBranding, setReportBranding] = useState<ReportBranding>({ name: 'Examify', brandName: 'Examify', primaryColor: '#0D9488', logoUrl: null, address: '', phone: '' });
 
   const load = useCallback(async () => {
     if (!institutionId) return;
@@ -51,9 +104,26 @@ export function Reports() {
     const loadedExams = (examData as unknown as ReportExam[]) ?? [];
     setExams(loadedExams);
 
+    const { data: institutionData } = await supabase.from('institutions').select('name, logo_url, settings').eq('id', institutionId).maybeSingle();
+    const institution = institutionData as { name?: string; logo_url?: string | null; settings?: { brandName?: string; primaryColor?: string; reportAddress?: string; reportPhone?: string } | null } | null;
+    const settings = institution?.settings ?? {};
+    let logoUrl: string | null = institution?.logo_url ?? null;
+    if (logoUrl && !logoUrl.startsWith('http')) {
+      const { data: signed } = await supabase.storage.from('public-assets').createSignedUrl(logoUrl, 60 * 60);
+      logoUrl = signed?.signedUrl ?? null;
+    }
+    setReportBranding({
+      name: institution?.name ?? 'Examify',
+      brandName: settings.brandName ?? institution?.name ?? 'Examify',
+      primaryColor: settings.primaryColor ?? '#0D9488',
+      logoUrl,
+      address: settings.reportAddress ?? '',
+      phone: settings.reportPhone ?? '',
+    });
+
     let query = supabase
       .from('exam_attempts')
-      .select('id, submitted_at, score, score_percentage, is_passed, is_result_published, status, examify_exams!inner(id, title, subject_id, total_points, passing_score, subjects(name))')
+      .select('id, submitted_at, score, score_percentage, is_passed, is_result_published, status, student_profiles(full_name, student_code, phone), examify_exams!inner(id, title, subject_id, total_points, passing_score, subjects(name))')
       .eq('examify_exams.institution_id', institutionId)
       .in('status', ['submitted', 'auto_submitted', 'graded', 'approved']);
 
@@ -65,7 +135,77 @@ export function Reports() {
 
     const { data, error: err } = await query.order('submitted_at', { ascending: false });
     if (err) { console.error('Reports load failed', err); setError(getArabicErrorMessage(err)); setLoading(false); return; }
-    setAttempts((data as unknown as AttemptForReport[]) ?? []);
+    const loadedAttempts = (data as unknown as AttemptForReport[]) ?? [];
+    setAttempts(loadedAttempts);
+
+    if (loadedAttempts.length === 0) {
+      setReportAnswers([]);
+      setLoading(false);
+      return;
+    }
+
+    const attemptIds = loadedAttempts.map((attempt) => attempt.id);
+    const { data: answerData, error: answerError } = await supabase
+      .from('answers')
+      .select('attempt_id, question_id, option_id, text_answer, numeric_answer, is_correct, awarded_points, questions!inner(prompt, type, points)')
+      .in('attempt_id', attemptIds)
+      .order('created_at', { ascending: true });
+
+    if (answerError) {
+      console.error('Report answers load failed', answerError);
+      setReportAnswers([]);
+      setError(getArabicErrorMessage(answerError));
+      setLoading(false);
+      return;
+    }
+
+    const rawAnswers = (answerData as unknown as Omit<ReportExportAnswer, 'question_number' | 'selected_option_label' | 'correct_option_label'>[]) ?? [];
+    const questionIds = [...new Set(rawAnswers.map((answer) => answer.question_id))];
+    const { data: optionData, error: optionError } = questionIds.length > 0
+      ? await supabase.from('question_options').select('id, question_id, label, is_correct, sort_order').in('question_id', questionIds).order('sort_order', { ascending: true })
+      : { data: [], error: null };
+
+    if (optionError) {
+      console.error('Report answer options load failed', optionError);
+      setReportAnswers([]);
+      setError(getArabicErrorMessage(optionError));
+      setLoading(false);
+      return;
+    }
+
+    const examIds = [...new Set(loadedAttempts.map((attempt) => attempt.examify_exams.id))];
+    const { data: examQuestionData, error: examQuestionError } = await supabase
+      .from('exam_questions')
+      .select('exam_id, question_id, sort_order')
+      .in('exam_id', examIds)
+      .order('sort_order', { ascending: true });
+    if (examQuestionError) console.warn('Report question order unavailable', examQuestionError);
+    const questionOrderByExam = new Map<string, number>();
+    for (const item of (examQuestionData as { exam_id: string; question_id: string; sort_order: number }[]) ?? []) {
+      questionOrderByExam.set(`${item.exam_id}:${item.question_id}`, item.sort_order + 1);
+    }
+
+    const optionsByQuestion = new Map<string, { id: string; label: string; is_correct: boolean }[]>();
+    for (const option of (optionData as { id: string; question_id: string; label: string; is_correct: boolean }[]) ?? []) {
+      const options = optionsByQuestion.get(option.question_id) ?? [];
+      options.push(option);
+      optionsByQuestion.set(option.question_id, options);
+    }
+    const questionNumbers = new Map<string, number>();
+    const normalizedAnswers = rawAnswers.map((answer) => {
+      const attempt = loadedAttempts.find((item) => item.id === answer.attempt_id);
+      const questionKey = attempt ? `${attempt.examify_exams.id}:${answer.question_id}` : '';
+      const fallbackNumber = (questionNumbers.get(answer.attempt_id) ?? 0) + 1;
+      questionNumbers.set(answer.attempt_id, fallbackNumber);
+      const options = optionsByQuestion.get(answer.question_id) ?? [];
+      return {
+        ...answer,
+        question_number: questionOrderByExam.get(questionKey) ?? fallbackNumber,
+        selected_option_label: options.find((option) => option.id === answer.option_id)?.label ?? null,
+        correct_option_label: options.find((option) => option.is_correct)?.label ?? null,
+      };
+    });
+    setReportAnswers(normalizedAnswers);
     setLoading(false);
   }, [dateFrom, dateTo, filterExam, filterStatus, filterSubject, institutionId]);
 
@@ -91,49 +231,534 @@ export function Reports() {
     return { exam, total, passed: examPassed, avg: examAvg };
   }).filter((s) => s.total > 0);
 
-  function exportExcel() {
-    const rows = published.map((a) => ({
-      'الامتحان': a.examify_exams.title,
-      'المادة': a.examify_exams.subjects?.name ?? '',
-      'الدرجة': a.score ?? 0,
-      'النسبة': a.score_percentage?.toFixed(1) ?? '0',
-      'النتيجة': a.is_passed ? 'ناجح' : 'راسب',
-      'الحالة': a.status,
-      'منشور': a.is_result_published ? 'نعم' : 'لا',
-      'تاريخ التسليم': a.submitted_at ? new Date(a.submitted_at).toLocaleString('ar') : '',
-    }));
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'النتائج');
-    XLSX.writeFile(wb, `تقرير-النتائج-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  async function exportExcel() {
+    if (exporting || totalAttempts === 0) return;
+    setExporting(true);
+    setError(null);
+    try {
+      await exportResultsWorkbook({
+        attempts: published,
+        examStats,
+        answers: reportAnswers.filter((answer) => published.some((attempt) => attempt.id === answer.attempt_id)),
+      });
+    } catch (exportError) {
+      console.error('Excel export failed', exportError);
+      setError('تعذر إنشاء ملف Excel. حاول مرة أخرى.');
+    } finally {
+      setExporting(false);
+    }
   }
 
-  function exportPDF() {
+  async function exportPDF() {
     const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-    pdf.setFontSize(16);
-    pdf.setFont('helvetica', 'bold');
-    pdf.text(ar.reports.reportTitle, 15, 20);
-    pdf.setFontSize(10);
-    pdf.setFont('helvetica', 'normal');
-    pdf.text(`${ar.reports.date}: ${new Date().toLocaleDateString('ar')}`, 15, 28);
-    pdf.text(`${ar.reports.totalAttempts}: ${totalAttempts}`, 15, 35);
-    pdf.text(`${ar.reports.passRate}: ${passRate.toFixed(1)}%`, 15, 42);
-    pdf.text(`${ar.reports.average}: ${avgScore.toFixed(1)}%`, 15, 49);
-    pdf.text(`${ar.reports.highestLowest}: ${highest.toFixed(1)}% / ${lowest.toFixed(1)}%`, 15, 56);
+    const logoData = await imageUrlToDataUrl(reportBranding.logoUrl);
+    const brandingLine = [reportBranding.brandName, reportBranding.address, reportBranding.phone].filter(Boolean).join(' · ') || 'Examify';
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 14;
+    const contentWidth = pageWidth - (margin * 2);
+    const colors = {
+      navy: [20, 35, 70] as const,
+      teal: hexToRgb(reportBranding.primaryColor),
+      orange: [245, 158, 11] as const,
+      ink: [31, 41, 55] as const,
+      muted: [100, 116, 139] as const,
+      line: [226, 232, 240] as const,
+      pale: [248, 250, 252] as const,
+      white: [255, 255, 255] as const,
+    };
 
-    let y = 68;
-    pdf.setFont('helvetica', 'bold');
-    pdf.text(ar.reports.perExamBreakdown, 15, y);
-    y += 8;
-    pdf.setFont('helvetica', 'normal');
-    pdf.setFontSize(9);
-    for (const s of examStats) {
-      pdf.text(`${s.exam.title}: ${s.total} ${ar.reports.attempts}, ${s.passed} ${ar.reports.passed}, ${ar.reports.average} ${s.avg.toFixed(1)}%`, 15, y);
-      y += 6;
-      if (y > 280) { pdf.addPage(); y = 20; }
+    pdf.setR2L(false);
+
+    function drawArabicText(
+      text: string,
+      rightX: number,
+      baselineY: number,
+      fontSize: number,
+      color: readonly [number, number, number],
+      bold = false,
+      maxWidth = contentWidth,
+    ) {
+      const scale = 4;
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      context.font = `${bold ? '700' : '400'} ${fontSize * scale}px Arial, sans-serif`;
+      const measuredWidth = Math.ceil(context.measureText(text).width) + (8 * scale);
+      const canvasWidth = Math.max(24, Math.min(Math.ceil(maxWidth * scale), measuredWidth));
+      canvas.width = canvasWidth;
+      canvas.height = Math.ceil((fontSize + 5) * scale);
+      context.font = `${bold ? '700' : '400'} ${fontSize * scale}px Arial, sans-serif`;
+      context.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+      context.direction = 'rtl';
+      context.textAlign = 'right';
+      context.textBaseline = 'alphabetic';
+      context.fillText(text, canvasWidth - (4 * scale), fontSize * scale, canvasWidth - (8 * scale));
+      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', rightX - (canvasWidth / scale), baselineY - fontSize + 1, canvasWidth / scale, (fontSize + 5) / scale);
     }
 
-    pdf.save(`تقرير-النتائج-${new Date().toISOString().slice(0, 10)}.pdf`);
+    function drawPageHeader(pageNumber: number) {
+      pdf.setFillColor(...colors.navy);
+      pdf.rect(0, 0, pageWidth, 34, 'F');
+      if (logoData && !logoData.startsWith('data:image/svg+xml')) pdf.addImage(logoData, logoData.startsWith('data:image/jpeg') ? 'JPEG' : 'PNG', margin, 6, 16, 16);
+      pdf.setFillColor(...colors.teal);
+      pdf.rect(0, 31, pageWidth, 3, 'F');
+      drawArabicText(ar.reports.reportTitle, pageWidth - margin, 23, 17, colors.white, true);
+      drawArabicText(`${brandingLine} · ${ar.reports.date}: ${new Date().toLocaleDateString('ar-EG')}`, pageWidth - margin, 29, 9, colors.white);
+      pdf.setTextColor(...colors.ink);
+      pdf.setFontSize(8);
+      pdf.text(`${pageNumber}`, margin, pageHeight - 9, { align: 'left' });
+      drawArabicText(reportBranding.brandName, pageWidth - margin, pageHeight - 9, 8, colors.ink);
+    }
+
+    function drawMetricCard(x: number, y: number, width: number, label: string, value: string, accent: readonly [number, number, number]) {
+      pdf.setFillColor(...colors.pale);
+      pdf.setDrawColor(...colors.line);
+      pdf.roundedRect(x, y, width, 25, 3, 3, 'FD');
+      pdf.setFillColor(...accent);
+      pdf.roundedRect(x, y, 3, 25, 1.5, 1.5, 'F');
+      drawArabicText(label, x + width - 8, y + 9, 8, colors.muted, false, width - 12);
+      pdf.setTextColor(...colors.ink);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setFontSize(15);
+      pdf.text(value, x + width - 8, y + 19, { align: 'right' });
+    }
+
+    function drawProgress(x: number, y: number, width: number, value: number) {
+      const bounded = Math.max(0, Math.min(100, value));
+      pdf.setFillColor(226, 232, 240);
+      pdf.roundedRect(x, y, width, 4, 2, 2, 'F');
+      const progressColor: readonly [number, number, number] = bounded >= 50 ? colors.teal : [239, 68, 68];
+      pdf.setFillColor(...progressColor);
+      pdf.roundedRect(x, y, width * (bounded / 100), 4, 2, 2, 'F');
+    }
+
+    function drawExamTable(startY: number, currentPage: number) {
+      let y = startY;
+      const columns = [
+        { label: 'الامتحان', width: 76 },
+        { label: 'عدد المحاولات', width: 29 },
+        { label: 'الناجحون', width: 25 },
+        { label: 'المتوسط', width: 32 },
+      ];
+
+      function drawTableHeader() {
+        pdf.setFillColor(...colors.navy);
+        pdf.roundedRect(margin, y, contentWidth, 11, 2, 2, 'F');
+        let cursor = pageWidth - margin - 8;
+        for (const column of columns) {
+          drawArabicText(column.label, cursor, y + 7, 9, colors.white, true, column.width - 8);
+          cursor -= column.width;
+        }
+        y += 11;
+      }
+
+      drawTableHeader();
+      for (const [index, stat] of examStats.entries()) {
+        if (y > pageHeight - 25) {
+          pdf.addPage();
+          currentPage += 1;
+          drawPageHeader(currentPage);
+          y = 48;
+          drawTableHeader();
+        }
+        const rowColor: readonly [number, number, number] = index % 2 === 0 ? colors.white : colors.pale;
+        pdf.setFillColor(...rowColor);
+        pdf.setDrawColor(...colors.line);
+        pdf.rect(margin, y, contentWidth, 17, 'FD');
+        pdf.setTextColor(...colors.ink);
+        pdf.setFont('helvetica', 'normal');
+        pdf.setFontSize(9);
+        let cursor = pageWidth - margin - 8;
+        drawArabicText(stat.exam.title, cursor, y + 7, 9, colors.ink, false, columns[0].width - 8);
+        cursor -= columns[0].width;
+        pdf.text(String(stat.total), cursor, y + 7, { align: 'right' });
+        cursor -= columns[1].width;
+        pdf.text(String(stat.passed), cursor, y + 7, { align: 'right' });
+        cursor -= columns[2].width;
+        pdf.setFont('helvetica', 'bold');
+        pdf.text(`${stat.avg.toFixed(1)}%`, cursor, y + 7, { align: 'right' });
+        drawProgress(cursor - 22, y + 11, 22, stat.avg);
+        y += 17;
+      }
+      return currentPage;
+    }
+
+    let pageNumber = 1;
+    drawPageHeader(pageNumber);
+    const cardGap = 4;
+    const cardWidth = (contentWidth - (cardGap * 3)) / 4;
+    const cardY = 45;
+    drawMetricCard(margin, cardY, cardWidth, ar.reports.totalAttempts, String(totalAttempts), colors.teal);
+    drawMetricCard(margin + cardWidth + cardGap, cardY, cardWidth, ar.reports.passRate, `${passRate.toFixed(1)}%`, colors.orange);
+    drawMetricCard(margin + ((cardWidth + cardGap) * 2), cardY, cardWidth, ar.reports.average, `${avgScore.toFixed(1)}%`, colors.navy);
+    drawMetricCard(margin + ((cardWidth + cardGap) * 3), cardY, cardWidth, ar.reports.highestLowest, `${highest.toFixed(1)}% / ${lowest.toFixed(1)}%`, colors.teal);
+
+    drawArabicText(ar.reports.perExamBreakdown, pageWidth - margin, 88, 12, colors.ink, true);
+    pdf.setDrawColor(...colors.teal);
+    pdf.setLineWidth(1.2);
+    pdf.line(pageWidth - margin - 32, 91, pageWidth - margin, 91);
+    pageNumber = drawExamTable(98, pageNumber);
+    pdf.save(`examify-results-${new Date().toISOString().slice(0, 10)}.pdf`);
+  }
+
+  async function exportResponsesPDF() {
+    if (totalAttempts === 0) return;
+    const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    const logoData = await imageUrlToDataUrl(reportBranding.logoUrl);
+    const brandingLine = [reportBranding.brandName, reportBranding.address, reportBranding.phone].filter(Boolean).join(' · ') || 'Examify';
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 12;
+    const contentWidth = pageWidth - (margin * 2);
+    const colors = {
+      navy: [20, 35, 70] as const,
+      teal: hexToRgb(reportBranding.primaryColor),
+      orange: [245, 158, 11] as const,
+      ink: [31, 41, 55] as const,
+      muted: [100, 116, 139] as const,
+      line: [226, 232, 240] as const,
+      pale: [248, 250, 252] as const,
+      white: [255, 255, 255] as const,
+      success: [22, 163, 74] as const,
+      danger: [220, 38, 38] as const,
+      warning: [217, 119, 6] as const,
+    };
+
+    pdf.setR2L(false);
+
+    function drawArabicText(
+      text: string,
+      rightX: number,
+      baselineY: number,
+      fontSize: number,
+      color: readonly [number, number, number],
+      bold = false,
+      maxWidth = contentWidth,
+    ) {
+      const scale = 4;
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      context.font = `${bold ? '700' : '400'} ${fontSize * scale}px Arial, sans-serif`;
+      const measuredWidth = Math.ceil(context.measureText(text).width) + (8 * scale);
+      const canvasWidth = Math.max(24, Math.min(Math.ceil(maxWidth * scale), measuredWidth));
+      canvas.width = canvasWidth;
+      canvas.height = Math.ceil((fontSize + 5) * scale);
+      context.font = `${bold ? '700' : '400'} ${fontSize * scale}px Arial, sans-serif`;
+      context.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+      context.direction = 'rtl';
+      context.textAlign = 'right';
+      context.textBaseline = 'alphabetic';
+      context.fillText(text, canvasWidth - (4 * scale), fontSize * scale, canvasWidth - (8 * scale));
+      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', rightX - (canvasWidth / scale), baselineY - fontSize + 1, canvasWidth / scale, (fontSize + 5) / scale);
+    }
+
+    function answerText(answer: ReportExportAnswer) {
+      if (answer.selected_option_label) return answer.selected_option_label;
+      if (answer.text_answer) return answer.text_answer;
+      if (answer.numeric_answer != null) return String(answer.numeric_answer);
+      return '—';
+    }
+
+    function statusText(answer: ReportExportAnswer) {
+      if (answer.is_correct === true) return 'صحيحة';
+      if (answer.is_correct === false) return 'خطأ';
+      return 'مراجعة يدوية';
+    }
+
+    const answersByAttempt = new Map<string, ReportExportAnswer[]>();
+    for (const answer of reportAnswers) {
+      const current = answersByAttempt.get(answer.attempt_id) ?? [];
+      current.push(answer);
+      answersByAttempt.set(answer.attempt_id, current);
+    }
+
+    let pageNumber = 0;
+    for (const attempt of published) {
+      if (pageNumber > 0) pdf.addPage();
+      pageNumber += 1;
+      const attemptAnswers = [...(answersByAttempt.get(attempt.id) ?? [])].sort((a, b) => a.question_number - b.question_number);
+      const correctCount = attemptAnswers.filter((answer) => answer.is_correct === true).length;
+      const reviewCount = attemptAnswers.filter((answer) => answer.is_correct == null).length;
+
+      pdf.setFillColor(...colors.navy);
+      pdf.rect(0, 0, pageWidth, 27, 'F');
+      if (logoData && !logoData.startsWith('data:image/svg+xml')) pdf.addImage(logoData, logoData.startsWith('data:image/jpeg') ? 'JPEG' : 'PNG', margin, 5, 16, 16);
+      pdf.setFillColor(...colors.teal);
+      pdf.rect(0, 24, pageWidth, 3, 'F');
+      drawArabicText('تقرير استجابات الطلاب', pageWidth - margin, 20, 16, colors.white, true);
+      drawArabicText(`${brandingLine} · ${ar.reports.date}: ${new Date().toLocaleDateString('ar-EG')}`, pageWidth - margin, 25, 8, colors.white);
+
+      const cardGap = 4;
+      const cardWidth = (contentWidth - (cardGap * 3)) / 4;
+      const cardY = 34;
+      const cards = [
+        { label: 'الطالب', value: attempt.student_profiles?.full_name ?? 'غير محدد', accent: colors.teal, arabicValue: true },
+        { label: 'الامتحان', value: attempt.examify_exams.title, accent: colors.navy, arabicValue: true },
+        { label: 'النتيجة', value: `${(attempt.score_percentage ?? 0).toFixed(1)}%`, accent: colors.orange, arabicValue: false },
+        { label: 'الصحيحة / المراجعة', value: `${correctCount} / ${reviewCount}`, accent: colors.teal, arabicValue: false },
+      ];
+      for (const [index, card] of cards.entries()) {
+        const x = margin + ((cardWidth + cardGap) * index);
+        const cardAccent = card.accent as readonly [number, number, number];
+        pdf.setFillColor(...colors.pale);
+        pdf.setDrawColor(...colors.line);
+        pdf.roundedRect(x, cardY, cardWidth, 23, 3, 3, 'FD');
+        pdf.setFillColor(...cardAccent);
+        pdf.roundedRect(x, cardY, 3, 23, 1.5, 1.5, 'F');
+        drawArabicText(card.label, x + cardWidth - 7, cardY + 8, 7.5, colors.muted, false, cardWidth - 12);
+        if (card.arabicValue) {
+          drawArabicText(card.value, x + cardWidth - 7, cardY + 18, 10, colors.ink, true, cardWidth - 12);
+        } else {
+          pdf.setTextColor(...colors.ink);
+          pdf.setFont('helvetica', 'bold');
+          pdf.setFontSize(13);
+          pdf.text(card.value, x + cardWidth - 7, cardY + 18, { align: 'right' });
+        }
+      }
+
+      let y = 67;
+      const columns = [
+        { key: 'question', label: 'السؤال', width: 108 },
+        { key: 'student', label: 'إجابة الطالب', width: 54 },
+        { key: 'correct', label: 'الإجابة الصحيحة', width: 54 },
+        { key: 'status', label: 'الحالة', width: 35 },
+        { key: 'points', label: 'الدرجة', width: 22 },
+      ] as const;
+      const drawTableHeader = () => {
+        pdf.setFillColor(...colors.navy);
+        pdf.roundedRect(margin, y, contentWidth, 10, 2, 2, 'F');
+        let cursor = pageWidth - margin - 7;
+        for (const column of columns) {
+          drawArabicText(column.label, cursor, y + 6.5, 8.5, colors.white, true, column.width - 8);
+          cursor -= column.width;
+        }
+        y += 10;
+      };
+      drawTableHeader();
+
+      for (const [index, answer] of attemptAnswers.entries()) {
+        if (y > pageHeight - 20) {
+          pdf.addPage();
+          pageNumber += 1;
+          pdf.setFillColor(...colors.navy);
+          pdf.rect(0, 0, pageWidth, 27, 'F');
+          if (logoData && !logoData.startsWith('data:image/svg+xml')) pdf.addImage(logoData, logoData.startsWith('data:image/jpeg') ? 'JPEG' : 'PNG', margin, 5, 16, 16);
+          pdf.setFillColor(...colors.teal);
+          pdf.rect(0, 24, pageWidth, 3, 'F');
+          drawArabicText('تقرير استجابات الطلاب', pageWidth - margin, 20, 16, colors.white, true);
+          drawArabicText(`${reportBranding.brandName} · الطالب: ${attempt.student_profiles?.full_name ?? 'غير محدد'}`, pageWidth - margin, 25, 8, colors.white);
+          y = 34;
+          drawTableHeader();
+        }
+        const rowColor: readonly [number, number, number] = index % 2 === 0 ? colors.white : colors.pale;
+        pdf.setFillColor(...rowColor);
+        pdf.setDrawColor(...colors.line);
+        pdf.rect(margin, y, contentWidth, 14, 'FD');
+        let cursor = pageWidth - margin - 7;
+        drawArabicText(`${answer.question_number}. ${answer.questions.prompt}`, cursor, y + 8, 7.5, colors.ink, false, columns[0].width - 8);
+        cursor -= columns[0].width;
+        drawArabicText(answerText(answer), cursor, y + 8, 7.5, colors.ink, false, columns[1].width - 8);
+        cursor -= columns[1].width;
+        drawArabicText(answer.correct_option_label ?? '—', cursor, y + 8, 7.5, colors.ink, false, columns[2].width - 8);
+        cursor -= columns[2].width;
+        const statusColor: readonly [number, number, number] = answer.is_correct === true ? colors.success : answer.is_correct === false ? colors.danger : colors.warning;
+        pdf.setFillColor(...statusColor);
+        pdf.roundedRect(cursor - columns[3].width + 5, y + 3.5, columns[3].width - 10, 7, 3.5, 3.5, 'F');
+        drawArabicText(statusText(answer), cursor - 5, y + 8, 7, colors.white, true, columns[3].width - 10);
+        cursor -= columns[3].width;
+        pdf.setTextColor(...colors.ink);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(8.5);
+        pdf.text(`${answer.awarded_points ?? 0}/${answer.questions.points}`, cursor, y + 8, { align: 'right' });
+        y += 14;
+      }
+
+      pdf.setTextColor(...colors.muted);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setFontSize(8);
+      pdf.text(`${pageNumber}`, margin, pageHeight - 8, { align: 'left' });
+      drawArabicText(reportBranding.brandName, pageWidth - margin, pageHeight - 8, 8, colors.muted);
+    }
+    pdf.save(`examify-student-responses-${new Date().toISOString().slice(0, 10)}.pdf`);
+  }
+
+  async function exportComparisonPDF() {
+    if (totalAttempts === 0) return;
+    const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    const logoData = await imageUrlToDataUrl(reportBranding.logoUrl);
+    const brandingLine = [reportBranding.brandName, reportBranding.address, reportBranding.phone].filter(Boolean).join(' · ') || 'Examify';
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 12;
+    const contentWidth = pageWidth - (margin * 2);
+    const colors = {
+      navy: [20, 35, 70] as const,
+      teal: hexToRgb(reportBranding.primaryColor),
+      orange: [245, 158, 11] as const,
+      ink: [31, 41, 55] as const,
+      muted: [100, 116, 139] as const,
+      line: [226, 232, 240] as const,
+      pale: [248, 250, 252] as const,
+      white: [255, 255, 255] as const,
+      success: [22, 163, 74] as const,
+      danger: [220, 38, 38] as const,
+      warning: [217, 119, 6] as const,
+    };
+
+    pdf.setR2L(false);
+
+    function drawArabicText(
+      text: string,
+      rightX: number,
+      baselineY: number,
+      fontSize: number,
+      color: readonly [number, number, number],
+      bold = false,
+      maxWidth = contentWidth,
+    ) {
+      const scale = 4;
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      context.font = `${bold ? '700' : '400'} ${fontSize * scale}px Arial, sans-serif`;
+      const measuredWidth = Math.ceil(context.measureText(text).width) + (8 * scale);
+      const canvasWidth = Math.max(24, Math.min(Math.ceil(maxWidth * scale), measuredWidth));
+      canvas.width = canvasWidth;
+      canvas.height = Math.ceil((fontSize + 5) * scale);
+      context.font = `${bold ? '700' : '400'} ${fontSize * scale}px Arial, sans-serif`;
+      context.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+      context.direction = 'rtl';
+      context.textAlign = 'right';
+      context.textBaseline = 'alphabetic';
+      context.fillText(text, canvasWidth - (4 * scale), fontSize * scale, canvasWidth - (8 * scale));
+      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', rightX - (canvasWidth / scale), baselineY - fontSize + 1, canvasWidth / scale, (fontSize + 5) / scale);
+    }
+
+    const gradeFor = (percentage: number) => percentage >= 90 ? 'A' : percentage >= 80 ? 'B' : percentage >= 70 ? 'C' : percentage >= 60 ? 'D' : 'F';
+    const rows = published.map((attempt) => ({
+      student: attempt.student_profiles?.full_name ?? 'غير محدد',
+      code: attempt.student_profiles?.student_code ?? '—',
+      exam: attempt.examify_exams.title,
+      subject: attempt.examify_exams.subjects?.name ?? 'بدون مادة',
+      score: attempt.score ?? 0,
+      percentage: attempt.score_percentage ?? 0,
+      grade: gradeFor(attempt.score_percentage ?? 0),
+      passed: attempt.is_passed,
+    })).sort((a, b) => a.student.localeCompare(b.student, 'ar'));
+    const uniqueStudents = new Set(rows.map((row) => row.student)).size;
+    const comparisonAverage = rows.length > 0 ? rows.reduce((sum, row) => sum + row.percentage, 0) / rows.length : 0;
+
+    let pageNumber = 0;
+    const columns = [
+      { label: 'الطالب', width: 62 },
+      { label: 'الكود', width: 30 },
+      { label: 'الامتحان', width: 70 },
+      { label: 'المادة', width: 45 },
+      { label: 'الدرجة', width: 22 },
+      { label: 'النسبة', width: 26 },
+      { label: 'التقدير', width: 18 },
+    ] as const;
+
+    const drawPageHeader = (subtitle: string) => {
+      pdf.setFillColor(...colors.navy);
+      pdf.rect(0, 0, pageWidth, 27, 'F');
+      if (logoData && !logoData.startsWith('data:image/svg+xml')) pdf.addImage(logoData, logoData.startsWith('data:image/jpeg') ? 'JPEG' : 'PNG', margin, 5, 16, 16);
+      pdf.setFillColor(...colors.teal);
+      pdf.rect(0, 24, pageWidth, 3, 'F');
+      drawArabicText('تقرير مقارنة التقديرات', pageWidth - margin, 20, 16, colors.white, true);
+      drawArabicText(`${brandingLine} · ${subtitle}`, pageWidth - margin, 25, 8, colors.white);
+    };
+
+    const drawFooter = () => {
+      pdf.setTextColor(...colors.muted);
+      pdf.setFont('helvetica', 'normal');
+      pdf.setFontSize(8);
+      pdf.text(`${pageNumber}`, margin, pageHeight - 8, { align: 'left' });
+      drawArabicText(reportBranding.brandName, pageWidth - margin, pageHeight - 8, 8, colors.muted);
+    };
+
+    let y = 34;
+    const firstPage = () => {
+      const cardGap = 4;
+      const cardWidth = (contentWidth - (cardGap * 3)) / 4;
+      const cards = [
+        { label: 'إجمالي السجلات', value: String(rows.length), accent: colors.teal },
+        { label: 'عدد الطلاب', value: String(uniqueStudents), accent: colors.navy },
+        { label: 'عدد الامتحانات', value: String(new Set(rows.map((row) => row.exam)).size), accent: colors.orange },
+        { label: 'متوسط النتائج', value: `${comparisonAverage.toFixed(1)}%`, accent: colors.teal },
+      ];
+      for (const [index, card] of cards.entries()) {
+        const x = margin + ((cardWidth + cardGap) * index);
+        const accent = card.accent as readonly [number, number, number];
+        pdf.setFillColor(...colors.pale);
+        pdf.setDrawColor(...colors.line);
+        pdf.roundedRect(x, y, cardWidth, 23, 3, 3, 'FD');
+        pdf.setFillColor(...accent);
+        pdf.roundedRect(x, y, 3, 23, 1.5, 1.5, 'F');
+        drawArabicText(card.label, x + cardWidth - 7, y + 8, 7.5, colors.muted, false, cardWidth - 12);
+        pdf.setTextColor(...colors.ink);
+        pdf.setFont('helvetica', 'bold');
+        pdf.setFontSize(13);
+        pdf.text(card.value, x + cardWidth - 7, y + 18, { align: 'right' });
+      }
+      y += 31;
+    };
+
+    const drawTableHeader = () => {
+      pdf.setFillColor(...colors.navy);
+      pdf.roundedRect(margin, y, contentWidth, 10, 2, 2, 'F');
+      let cursor = pageWidth - margin - 7;
+      for (const column of columns) {
+        drawArabicText(column.label, cursor, y + 6.5, 8.5, colors.white, true, column.width - 8);
+        cursor -= column.width;
+      }
+      y += 10;
+    };
+
+    pageNumber = 1;
+    drawPageHeader(`${ar.reports.date}: ${new Date().toLocaleDateString('ar-EG')}`);
+    firstPage();
+    drawTableHeader();
+
+    for (const [index, row] of rows.entries()) {
+      if (y > pageHeight - 20) {
+        drawFooter();
+        pdf.addPage();
+        pageNumber += 1;
+        drawPageHeader('استكمال مقارنة الطلاب والامتحانات');
+        y = 34;
+        drawTableHeader();
+      }
+      const rowColor: readonly [number, number, number] = index % 2 === 0 ? colors.white : colors.pale;
+      pdf.setFillColor(...rowColor);
+      pdf.setDrawColor(...colors.line);
+      pdf.rect(margin, y, contentWidth, 14, 'FD');
+      let cursor = pageWidth - margin - 7;
+      drawArabicText(row.student, cursor, y + 8, 7.5, colors.ink, false, columns[0].width - 8);
+      cursor -= columns[0].width;
+      drawArabicText(row.code, cursor, y + 8, 7.5, colors.ink, false, columns[1].width - 8);
+      cursor -= columns[1].width;
+      drawArabicText(row.exam, cursor, y + 8, 7.5, colors.ink, false, columns[2].width - 8);
+      cursor -= columns[2].width;
+      drawArabicText(row.subject, cursor, y + 8, 7.5, colors.ink, false, columns[3].width - 8);
+      cursor -= columns[3].width;
+      pdf.setTextColor(...colors.ink);
+      pdf.setFont('helvetica', 'bold');
+      pdf.setFontSize(8.5);
+      pdf.text(String(row.score), cursor, y + 8, { align: 'right' });
+      cursor -= columns[4].width;
+      pdf.text(`${row.percentage.toFixed(1)}%`, cursor, y + 8, { align: 'right' });
+      cursor -= columns[5].width;
+      const statusColor: readonly [number, number, number] = row.passed === true ? colors.success : row.passed === false ? colors.danger : colors.warning;
+      pdf.setFillColor(...statusColor);
+      pdf.roundedRect(cursor - columns[6].width + 4, y + 3.5, columns[6].width - 8, 7, 3.5, 3.5, 'F');
+      drawArabicText(row.passed == null ? 'مراجعة' : row.passed ? row.grade : 'راسب', cursor - 4, y + 8, 7, colors.white, true, columns[6].width - 8);
+      y += 14;
+    }
+    drawFooter();
+    pdf.save(`examify-grade-comparison-${new Date().toISOString().slice(0, 10)}.pdf`);
   }
 
   if (loading) return <div className="flex justify-center py-16"><Loader2 size={24} className="animate-spin text-brand-600" /></div>;
@@ -145,8 +770,10 @@ export function Reports() {
         subtitle={ar.reports.subtitle}
         action={
           <div className="flex gap-2">
-            <button data-testid="reports-export-excel" onClick={exportExcel} disabled={totalAttempts === 0} className="btn-outline disabled:opacity-40"><FileSpreadsheet size={16} /> Excel</button>
+            <button data-testid="reports-export-excel" onClick={() => void exportExcel()} disabled={totalAttempts === 0 || exporting} className="btn-outline disabled:opacity-40"><FileSpreadsheet size={16} /> {exporting ? 'جاري التصدير...' : 'Excel'}</button>
             <button data-testid="reports-export-pdf" onClick={exportPDF} disabled={totalAttempts === 0} className="btn-outline disabled:opacity-40"><Download size={16} /> PDF</button>
+            <button data-testid="reports-export-responses-pdf" onClick={exportResponsesPDF} disabled={totalAttempts === 0 || reportAnswers.length === 0} className="btn-outline disabled:opacity-40"><Download size={16} /> استجابات PDF</button>
+            <button data-testid="reports-export-comparison-pdf" onClick={exportComparisonPDF} disabled={totalAttempts === 0} className="btn-outline disabled:opacity-40"><Download size={16} /> مقارنة PDF</button>
           </div>
         }
       />
@@ -158,25 +785,61 @@ export function Reports() {
         </div>
       )}
 
-      <Card className="p-4">
-        <div className="grid md:grid-cols-5 gap-3">
-          <select data-testid="reports-filter-exam" className="input" value={filterExam} onChange={(e) => setFilterExam(e.target.value)}>
-            <option value="all">{ar.reports.allExams}</option>
-            {exams.map((e) => <option key={e.id} value={e.id}>{e.title}</option>)}
-          </select>
-          <select data-testid="reports-filter-subject" className="input" value={filterSubject} onChange={(e) => setFilterSubject(e.target.value)}>
-            <option value="all">جميع المواد</option>
-            {subjects.map(([id, name]) => <option key={id} value={id ?? ''}>{name}</option>)}
-          </select>
-          <select data-testid="reports-filter-status" className="input" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
-            <option value="all">جميع الحالات</option>
-            <option value="submitted">بانتظار التصحيح</option>
-            <option value="auto_submitted">مسلّم تلقائيًا</option>
-            <option value="graded">تم التصحيح</option>
-            <option value="approved">معتمد</option>
-          </select>
-          <input data-testid="reports-date-from" type="date" className="input" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
-          <input data-testid="reports-date-to" type="date" className="input" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+      <Card className="p-5">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-700 text-ink-900">تصفية التقارير</h3>
+            <p className="mt-1 text-sm text-ink-500">حدد نطاق البيانات التي تريد عرضها.</p>
+          </div>
+          <button type="button" onClick={() => { setFilterExam('all'); setFilterSubject('all'); setFilterStatus('all'); setDateFrom(''); setDateTo(''); }} className="btn-ghost !min-h-10 !px-3 !py-2 !text-sm">
+            مسح الفلاتر
+          </button>
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          <div>
+            <label className="label !mb-1.5 !text-sm">الامتحان</label>
+            <DropdownSelect
+              testId="reports-filter-exam"
+              value={filterExam}
+              onValueChange={setFilterExam}
+              ariaLabel="الامتحان"
+              options={[{ value: 'all', label: ar.reports.allExams }, ...exams.map((exam) => ({ value: exam.id, label: exam.title }))]}
+            />
+          </div>
+          <div>
+            <label className="label !mb-1.5 !text-sm">المادة</label>
+            <DropdownSelect
+              testId="reports-filter-subject"
+              value={filterSubject}
+              onValueChange={setFilterSubject}
+              ariaLabel="المادة"
+              options={[{ value: 'all', label: 'جميع المواد' }, ...subjects.filter(([id]) => Boolean(id)).map(([id, name]) => ({ value: id as string, label: name }))]}
+            />
+          </div>
+          <div>
+            <label className="label !mb-1.5 !text-sm">الحالة</label>
+            <DropdownSelect
+              testId="reports-filter-status"
+              value={filterStatus}
+              onValueChange={setFilterStatus}
+              ariaLabel="الحالة"
+              options={[
+                { value: 'all', label: 'جميع الحالات' },
+                { value: 'submitted', label: 'بانتظار التصحيح' },
+                { value: 'auto_submitted', label: 'مسلّم تلقائيًا' },
+                { value: 'graded', label: 'تم التصحيح' },
+                { value: 'approved', label: 'معتمد' },
+              ]}
+            />
+          </div>
+          <div>
+            <label className="label !mb-1.5 !text-sm">من تاريخ</label>
+            <input data-testid="reports-date-from" type="date" className="input !h-12 !py-3 !text-base" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+          </div>
+          <div>
+            <label className="label !mb-1.5 !text-sm">إلى تاريخ</label>
+            <input data-testid="reports-date-to" type="date" className="input !h-12 !py-3 !text-base" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+          </div>
         </div>
       </Card>
 

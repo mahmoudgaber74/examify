@@ -1,5 +1,29 @@
 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&family=Tajawal:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
+@font-face {
+  font-family: 'The Year of Handicrafts';
+  src: url('/fonts/TheYearofHandicrafts-Regular.otf') format('opentype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Tajarib';
+  src: url('/fonts/tajarib-typeface-bold.otf') format('opentype');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans Arabic';
+  src: url('/fonts/IBMPlexSansArabic-Light.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -7,6 +31,17 @@
 @layer base {
   :root {
     color-scheme: light;
+    --brand-50: 238 245 255;
+    --brand-100: 217 232 255;
+    --brand-200: 188 214 255;
+    --brand-300: 142 188 255;
+    --brand-400: 88 151 255;
+    --brand-500: 49 116 255;
+    --brand-600: 26 85 245;
+    --brand-700: 20 66 225;
+    --brand-800: 23 55 182;
+    --brand-900: 25 51 143;
+    --brand-950: 20 33 87;
   }
   html {
     direction: rtl;
@@ -18,9 +53,32 @@
     font-feature-settings: 'kern', 'liga', 'calt';
     min-width: 320px;
     min-height: 100vh;
-    background-image: radial-gradient(circle at 100% 0%, rgba(49, 116, 255, 0.045), transparent 28rem);
+    background-image: radial-gradient(circle at 100% 0%, rgb(var(--brand-500) / 0.045), transparent 28rem);
   }
   button, input, select, textarea { font: inherit; }
+  select:not([multiple]) {
+    @apply min-h-12 rounded-xl border border-ink-200 bg-white px-3.5 py-2.5 text-sm text-ink-900 transition;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2367738d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: left 0.75rem center;
+    padding-inline-start: 2.75rem;
+    padding-inline-end: 0.875rem;
+    text-align: start;
+  }
+  select:not([multiple]):hover:not(:disabled) {
+    @apply border-ink-300 bg-ink-50;
+  }
+  select:not([multiple]):focus-visible {
+    @apply border-brand-400 outline-none ring-2 ring-brand-100;
+  }
+  select:not([multiple]):disabled {
+    @apply cursor-not-allowed border-ink-100 bg-ink-50 text-ink-400;
+    opacity: 0.8;
+  }
+  select option {
+    @apply bg-white text-ink-900;
+  }
   button { cursor: pointer; }
   button:disabled { cursor: not-allowed; }
   ::selection {
@@ -68,6 +126,9 @@
   .btn-outline {
     @apply btn bg-white text-ink-800 border border-ink-200 hover:border-ink-300 hover:bg-ink-50;
   }
+  .btn-danger {
+    @apply btn bg-danger-600 text-white hover:bg-danger-700 active:scale-[0.98] shadow-soft;
+  }
   .chip {
     @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium;
   }
@@ -104,10 +165,80 @@
     background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
     animation: shimmer 1.6s infinite;
   }
+  .select-menu {
+    animation: select-menu-in 150ms ease-out both;
+    transform-origin: top right;
+  }
+  .sales-landing h1,
+  .sales-landing h2 {
+    font-family: 'The Year of Handicrafts', 'Tajawal', 'Cairo', sans-serif;
+    font-weight: 400;
+    letter-spacing: normal;
+  }
+  .sales-landing {
+    font-family: 'IBM Plex Sans Arabic', 'Cairo', 'Tajawal', sans-serif;
+    font-weight: 300;
+  }
+  .sales-landing h3 {
+    font-family: 'Tajarib', 'Tajawal', 'Cairo', sans-serif;
+    font-weight: 700;
+    letter-spacing: normal;
+  }
+}
+
+@layer utilities {
+  .feedback-viewport {
+    position: fixed;
+    z-index: 200;
+    inset-inline-end: 1.25rem;
+    top: 1.25rem;
+    width: min(390px, calc(100vw - 2rem));
+    display: grid;
+    gap: 0.75rem;
+    pointer-events: none;
+  }
+  .feedback-toast {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.7rem;
+    min-height: 4.25rem;
+    padding: 0.85rem 0.9rem;
+    overflow: hidden;
+    pointer-events: auto;
+    border: 1px solid rgba(213, 217, 227, 0.9);
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 18px 50px rgba(16, 24, 40, 0.16), 0 2px 8px rgba(16, 24, 40, 0.06);
+    animation: feedback-in 240ms ease-out both;
+  }
+  .feedback-toast-icon { display: grid; place-items: center; width: 2rem; height: 2rem; flex: 0 0 auto; border-radius: 0.75rem; background: #f6f7f9; }
+  .feedback-toast-close, .feedback-confirm-close { display: grid; place-items: center; flex: 0 0 auto; width: 1.9rem; height: 1.9rem; border-radius: 0.6rem; color: #8590a8; transition: 160ms ease; }
+  .feedback-toast-close:hover, .feedback-confirm-close:hover { color: #1f2330; background: #eceef2; }
+  .feedback-toast-bar { position: absolute; inset-inline: 0; bottom: 0; height: 3px; transform-origin: right; animation: feedback-progress 4.5s linear both; }
+  .feedback-confirm-backdrop { position: fixed; z-index: 210; inset: 0; display: grid; place-items: center; padding: 1rem; background: rgba(19, 22, 31, 0.56); backdrop-filter: blur(9px); animation: feedback-fade 160ms ease-out both; }
+  .feedback-confirm { position: relative; display: flex; align-items: flex-start; gap: 0.75rem; width: min(460px, 100%); padding: 1.35rem; border: 1px solid rgba(255, 255, 255, 0.72); border-radius: 1.35rem; background: #fff; box-shadow: 0 24px 80px rgba(16, 24, 40, 0.24); animation: feedback-modal-in 220ms ease-out both; }
+  .feedback-confirm-icon { display: grid; place-items: center; width: 2.6rem; height: 2.6rem; flex: 0 0 auto; border-radius: 0.9rem; color: #d97706; background: #fffbeb; }
+  .feedback-confirm-close { position: absolute; inset-inline-start: 0.85rem; top: 0.85rem; }
+  .feedback-confirm-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.6rem; width: 100%; margin-top: 1.1rem; padding-top: 1rem; border-top: 1px solid #eceef2; }
+  :where(.fixed.inset-0.z-50) { background-color: rgba(19, 22, 31, 0.58) !important; backdrop-filter: blur(8px); }
+  :where(.fixed.inset-0.z-50) > div { border-color: rgba(213, 217, 227, 0.9); box-shadow: 0 24px 80px rgba(16, 24, 40, 0.22); }
+  @keyframes feedback-in { from { opacity: 0; transform: translateY(-8px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+  @keyframes feedback-modal-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+  @keyframes feedback-fade { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes feedback-progress { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+  @keyframes select-menu-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 }
 
 @media (max-width: 640px) {
   .card { border-radius: 1rem; }
+}
+
+@layer utilities {
+  .consent-banner { position: fixed; z-index: 190; inset-inline: 1rem; bottom: 1rem; display: flex; align-items: center; gap: 0.75rem; width: min(760px, calc(100vw - 2rem)); margin-inline: auto; padding: 0.85rem 1rem; border: 1px solid rgba(213, 217, 227, 0.95); border-radius: 1rem; background: rgba(255, 255, 255, 0.97); box-shadow: 0 18px 50px rgba(16, 24, 40, 0.16); backdrop-filter: blur(12px); animation: feedback-in 240ms ease-out both; }
+  .consent-banner-icon { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; flex: 0 0 auto; border-radius: 0.75rem; color: #1a55f5; background: #eef5ff; }
+  .consent-actions { display: flex; align-items: center; gap: 0.5rem; flex: 0 0 auto; }
+  @media (max-width: 640px) { .consent-banner { align-items: flex-start; flex-wrap: wrap; } .consent-actions { width: 100%; justify-content: flex-end; } }
 }
 
 @layer utilities {

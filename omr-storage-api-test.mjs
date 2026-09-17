@@ -20,6 +20,10 @@ const results = [];
 const ids = {
   instA: randomUUID(),
   instB: randomUUID(),
+  subjectA: randomUUID(),
+  classA: randomUUID(),
+  sectionA: randomUUID(),
+  staffA: randomUUID(),
   examA: randomUUID(),
   examB: randomUUID(),
 };
@@ -129,20 +133,32 @@ async function main() {
       (${sqlValue(ids.instA)}::uuid, 'OMR School A', 'enterprise', 'active', 1000, 100, 100, true),
       (${sqlValue(ids.instB)}::uuid, 'OMR School B', 'enterprise', 'active', 1000, 100, 100, true);
 
-    insert into public.staff_profiles (user_id, institution_id, full_name, role, is_active)
+    insert into public.staff_profiles (id, user_id, institution_id, full_name, role, is_active)
     values
-      (${sqlValue(users.adminA.id)}::uuid, ${sqlValue(ids.instA)}::uuid, 'OMR Admin A', 'school_admin', true),
-      (${sqlValue(users.teacherA.id)}::uuid, ${sqlValue(ids.instA)}::uuid, 'OMR Teacher A', 'teacher', true),
-      (${sqlValue(users.graderA.id)}::uuid, ${sqlValue(ids.instA)}::uuid, 'OMR Grader A', 'grader', true),
-      (${sqlValue(users.adminB.id)}::uuid, ${sqlValue(ids.instB)}::uuid, 'OMR Admin B', 'school_admin', true);
+      (gen_random_uuid(), ${sqlValue(users.adminA.id)}::uuid, ${sqlValue(ids.instA)}::uuid, 'OMR Admin A', 'school_admin', true),
+      (${sqlValue(ids.staffA)}::uuid, ${sqlValue(users.teacherA.id)}::uuid, ${sqlValue(ids.instA)}::uuid, 'OMR Teacher A', 'teacher', true),
+      (gen_random_uuid(), ${sqlValue(users.graderA.id)}::uuid, ${sqlValue(ids.instA)}::uuid, 'OMR Grader A', 'grader', true),
+      (gen_random_uuid(), ${sqlValue(users.adminB.id)}::uuid, ${sqlValue(ids.instB)}::uuid, 'OMR Admin B', 'school_admin', true);
+
+    insert into public.subjects (id, institution_id, name, code, is_active)
+    values (${sqlValue(ids.subjectA)}::uuid, ${sqlValue(ids.instA)}::uuid, 'OMR Subject A', 'OMR-${run}', true);
+
+    insert into public.classes (id, institution_id, name, academic_year, is_active)
+    values (${sqlValue(ids.classA)}::uuid, ${sqlValue(ids.instA)}::uuid, 'OMR Class A', '2026-2027', true);
+
+    insert into public.sections (id, class_id, name, is_active)
+    values (${sqlValue(ids.sectionA)}::uuid, ${sqlValue(ids.classA)}::uuid, 'OMR Section A', true);
+
+    insert into public.subject_teachers (subject_id, class_id, teacher_id, section_id, is_active)
+    values (${sqlValue(ids.subjectA)}::uuid, ${sqlValue(ids.classA)}::uuid, ${sqlValue(ids.staffA)}::uuid, ${sqlValue(ids.sectionA)}::uuid, true);
 
     insert into public.student_profiles (id, user_id, institution_id, student_code, full_name, is_active, status)
     values (${sqlValue(studentProfileA)}::uuid, ${sqlValue(users.studentA.id)}::uuid, ${sqlValue(ids.instA)}::uuid, ${sqlValue(`OMR-${run}`)}, 'OMR Student A', true, 'active');
 
-    insert into public.examify_exams (id, institution_id, title, status)
+    insert into public.examify_exams (id, institution_id, subject_id, class_id, title, status)
     values
-      (${sqlValue(ids.examA)}::uuid, ${sqlValue(ids.instA)}::uuid, 'OMR Exam A', 'draft'),
-      (${sqlValue(ids.examB)}::uuid, ${sqlValue(ids.instB)}::uuid, 'OMR Exam B', 'draft');
+      (${sqlValue(ids.examA)}::uuid, ${sqlValue(ids.instA)}::uuid, ${sqlValue(ids.subjectA)}::uuid, ${sqlValue(ids.classA)}::uuid, 'OMR Exam A', 'published'),
+      (${sqlValue(ids.examB)}::uuid, ${sqlValue(ids.instB)}::uuid, NULL, NULL, 'OMR Exam B', 'draft');
   `);
 
   const clients = {

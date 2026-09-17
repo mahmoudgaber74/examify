@@ -25,6 +25,7 @@ const ids = {
   optionA: randomUUID(),
   optionB: randomUUID(),
   examA: randomUUID(),
+  examQuestionA: randomUUID(),
   bubbleA: randomUUID(),
 };
 
@@ -88,6 +89,7 @@ function signedClient(user) {
 
 async function expectOk(account, operation, promise) {
   const { data, error } = await promise;
+  if (error) throw new Error(`${account} ${operation} failed: ${error.message}`);
   record(account, operation, 'success', error ? error.message : 'success', !error);
   return { data, error };
 }
@@ -156,8 +158,8 @@ async function main() {
     insert into public.examify_exams (id, institution_id, subject_id, class_id, title, total_points, passing_score, duration_minutes, max_attempts, status, show_result_immediately, show_correct_answers)
     values (${sqlValue(ids.examA)}::uuid, ${sqlValue(ids.instA)}::uuid, ${sqlValue(ids.subjectA)}::uuid, ${sqlValue(ids.classA)}::uuid, 'OMR API Exam', 1, 50, 30, 1, 'published', false, true);
 
-    insert into public.exam_questions (exam_id, question_id, points, sort_order)
-    values (${sqlValue(ids.examA)}::uuid, ${sqlValue(ids.questionA)}::uuid, 1, 0);
+    insert into public.exam_questions (id, exam_id, question_id, points, sort_order)
+    values (${sqlValue(ids.examQuestionA)}::uuid, ${sqlValue(ids.examA)}::uuid, ${sqlValue(ids.questionA)}::uuid, 1, 0);
 
     insert into public.exam_assignments (exam_id, class_id)
     values (${sqlValue(ids.examA)}::uuid, ${sqlValue(ids.classA)}::uuid);
@@ -165,24 +167,50 @@ async function main() {
 
   const teacherA = signedClient(users.teacherA);
   const studentA = signedClient(users.studentAUser);
+  const adminA = signedClient(users.adminA);
   const adminB = signedClient(users.adminB);
   const image = pngBuffer(run);
   const imageHash = sha256(image);
   const storagePath = `${ids.instA}/omr-original/${users.teacherA.id}/${ids.examA}/${randomUUID()}/${imageHash}.png`;
-
-  const { data: bubbleRows } = await expectOk('Teacher A', 'create OMR template with metadata', teacherA.from('bubble_sheets').insert({
-    institution_id: ids.instA,
-    exam_id: ids.examA,
-    model_label: 'A',
-    questions_count: 1,
-    choices_count: 4,
-    include_student_id: true,
-    include_student_name: true,
-    include_qr: true,
-    template_version: 1,
-    page_size: 'A4',
-    generated_by: users.teacherA.id,
-  }).select('id, template_version, page_size').single());
+  const { data: bubbleRows } = await expectOk('Teacher A', 'create OMR template with metadata', teacherA.rpc('create_exact_bubble_sheet_snapshot_idempotent', {
+    p_snapshot: {
+      exam_id: ids.examA,
+      model_label: 'A',
+      questions_count: 1,
+      choices_count: 2,
+      include_student_id: true,
+      include_student_name: true,
+      include_qr: true,
+      template_version: 1,
+      qr_token: randomUUID(),
+      generation_request_id: randomUUID(),
+      page_size: 'A4',
+      page_orientation: 'portrait',
+      generator_version: 'api-test',
+      sections: [{ section_key: 'omr-api', title: 'OMR API', visual_index: 0, question_start_index: 1, question_count: 1, page_number: 1, normalized_x: 0.05, normalized_y: 0.1, normalized_width: 0.9, normalized_height: 0.8 }],
+      questions: [{
+        exam_question_id: ids.examQuestionA,
+        question_id: ids.questionA,
+        question_type: 'multiple_choice',
+        points_snapshot: 1,
+        omr_eligible: true,
+        question_ordinal: 1,
+        section_visual_index: 0,
+        global_question_number: 1,
+        section_question_number: 1,
+        page_number: 1,
+        sort_snapshot: 0,
+        normalized_x: 0.1,
+        normalized_y: 0.2,
+        normalized_width: 0.8,
+        normalized_height: 0.03,
+        options: [
+          { option_id: ids.optionA, option_label: 'A', canonical_option_ordinal: 1, visual_index: 0, normalized_x: 0.1, normalized_y: 0.25, normalized_width: 0.1, normalized_height: 0.02 },
+          { option_id: ids.optionB, option_label: 'B', canonical_option_ordinal: 2, visual_index: 1, normalized_x: 0.3, normalized_y: 0.25, normalized_width: 0.1, normalized_height: 0.02 },
+        ],
+      }],
+    },
+  }));
   ids.bubbleA = bubbleRows?.id;
 
   await expectOk('Teacher A', 'upload OMR image bytes', teacherA.storage.from('exam-sheets').upload(
@@ -191,7 +219,7 @@ async function main() {
     { contentType: 'image/png' },
   ));
 
-  const { data: omrRows } = await expectOk('Teacher A', 'create OMR result with SHA-256 metadata', teacherA.from('omr_results').insert({
+  const { data: omrRows } = await expectOk('Fixture Admin', 'create OMR result with SHA-256 metadata', adminA.from('omr_results').insert({
     institution_id: ids.instA,
     bubble_sheet_id: ids.bubbleA,
     exam_id: ids.examA,
@@ -209,7 +237,7 @@ async function main() {
   }).select('id').single());
   const omrId = omrRows?.id;
 
-  await expectFail('Teacher A', 'reject duplicate OMR scan hash for same exam', teacherA.from('omr_results').insert({
+  await expectFail('Fixture Admin', 'reject duplicate OMR scan hash for same exam', adminA.from('omr_results').insert({
     institution_id: ids.instA,
     bubble_sheet_id: ids.bubbleA,
     exam_id: ids.examA,
@@ -248,8 +276,8 @@ async function main() {
   const answerId = answerRows?.id;
 
   await expectFail('Student A', 'cannot read OMR result before approval', studentA.from('omr_results').select('id').eq('id', omrId));
-  await expectFail('Institution B', 'cannot approve foreign OMR', adminB.rpc('approve_omr_result', { p_omr_result_id: omrId, p_student_profile_id: ids.studentA }));
-  await expectFail('Teacher A', 'cannot approve unresolved review item', teacherA.rpc('approve_omr_result', { p_omr_result_id: omrId, p_student_profile_id: ids.studentA }));
+  await expectFail('Institution B', 'cannot approve foreign OMR', adminB.rpc('approve_omr_result_idempotent', { p_omr_result_id: omrId, p_student_profile_id: ids.studentA }));
+  await expectFail('Teacher A', 'cannot approve unresolved review item', teacherA.rpc('approve_omr_result_idempotent', { p_omr_result_id: omrId, p_student_profile_id: ids.studentA }));
 
   await expectOk('Teacher A', 'manual review writes override and audit', teacherA.from('omr_answers').update({
     manual_override: 'B',
@@ -266,7 +294,7 @@ async function main() {
   `));
   record('Database', 'manual OMR review audit row exists', '1+', String(auditCount), auditCount >= 1);
 
-  const { data: approvalRows } = await expectOk('Teacher A', 'approve OMR into exam attempt', teacherA.rpc('approve_omr_result', { p_omr_result_id: omrId, p_student_profile_id: ids.studentA }));
+  const { data: approvalRows } = await expectOk('Teacher A', 'approve OMR into exam attempt', teacherA.rpc('approve_omr_result_idempotent', { p_omr_result_id: omrId, p_student_profile_id: ids.studentA }));
   const attemptId = approvalRows?.[0]?.exam_attempt_id;
 
   record('Database', 'approved OMR has attempt id', 'uuid', attemptId ?? 'missing', Boolean(attemptId));

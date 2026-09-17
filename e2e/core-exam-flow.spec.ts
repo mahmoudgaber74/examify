@@ -59,7 +59,6 @@ test.describe.serial('core exam flow with automatic grading', () => {
     await expect(page.getByTestId('exam-option').first()).toBeVisible({ timeout: 20_000 });
     await page.getByTestId('exam-option').first().click();
     await expect(page.getByTestId('exam-option').first()).toHaveClass(/border-brand-500/);
-    page.once('dialog', (dialog) => dialog.accept());
     await page.getByTestId('exam-submit').click();
     await expect(page.getByText('تم التصحيح تلقائيًا')).toBeVisible({ timeout: 20_000 });
     await expect(page.getByText('100.0%')).toBeVisible();
@@ -72,7 +71,7 @@ test.describe.serial('core exam flow with automatic grading', () => {
       order by started_at desc
       limit 1;
     `);
-    expect(attemptState).toBe('approved|1.00|100|true|true');
+    expect(attemptState).toBe('graded|1.00|100|true|false');
 
     const answerState = psqlScalar(`
       select count(*)::text || '|' || bool_and(is_correct)::text || '|' || sum(awarded_points)::text
@@ -108,7 +107,6 @@ test.describe.serial('core exam flow with automatic grading', () => {
     await examCard.getByTestId('exam-start').click();
     await expect(page.getByText('Wrong E2E option')).toBeVisible({ timeout: 20_000 });
     await page.getByText('Wrong E2E option').click();
-    page.once('dialog', (dialog) => dialog.accept());
     await page.getByTestId('exam-submit').click();
     await expect(page.getByText('تم التصحيح تلقائيًا')).toBeVisible({ timeout: 20_000 });
     await expect(page.getByText('0.0%')).toBeVisible();

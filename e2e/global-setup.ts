@@ -18,7 +18,8 @@ function sqlValue(value: string) {
 }
 
 function psql(sql: string) {
-  execFileSync('docker', ['exec', '-i', 'supabase_db_project', 'psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], {
+  const databaseContainer = process.env.SUPABASE_DB_CONTAINER ?? 'supabase_db_project';
+  execFileSync('docker', ['exec', '-i', databaseContainer, 'psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1'], {
     input: sql,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -26,6 +27,13 @@ function psql(sql: string) {
 }
 
 function localStatus(): Required<Pick<LocalStatus, 'API_URL' | 'ANON_KEY'>> & { SERVICE_ROLE_KEY: string } {
+  if (process.env.VITE_SUPABASE_URL && process.env.VITE_SUPABASE_ANON_KEY && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    return {
+      API_URL: process.env.VITE_SUPABASE_URL,
+      ANON_KEY: process.env.VITE_SUPABASE_ANON_KEY,
+      SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+    };
+  }
   const raw = execFileSync('cmd.exe', ['/c', '.\\node_modules\\.bin\\supabase.cmd', 'status', '-o', 'json'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],

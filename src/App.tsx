@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Sidebar, MobileNav } from './components/Sidebar';
 import { Topbar } from './components/Topbar';
 import { PWAInstallPrompt } from './components/PWAInstall';
 import { AuthProvider, useAuth } from './components/AuthProvider';
 import { Auth } from './views/Auth';
-import { bootstrapFirstAdmin } from './lib/auth';
+import { LandingPage } from './views/LandingPage';
 import { type ViewId, NAV_ITEMS } from './lib/navigation';
 import { Dashboard } from './views/Dashboard';
 import { Assessment } from './views/Assessment';
@@ -29,7 +29,12 @@ import { BubbleSheet } from './views/BubbleSheet';
 import { OmrOperations } from './views/OmrOperations';
 import { Reports } from './views/Reports';
 import { AiEngine } from './views/AiEngine';
-import { Loader2, ShieldCheck } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
+import { FeedbackProvider } from './components/FeedbackProvider';
+import { trackMarketingEvent } from './lib/marketing-analytics';
+import { supabase } from './lib/auth';
+import { applyInstitutionTheme } from './lib/institution-theme';
+import { MfaGate } from './components/MfaGate';
 
 const SUBTITLES: Record<ViewId, string> = {
   dashboard: 'ذكاء لحظي عبر جميع المؤسسات والفروع والمتعلمين',
@@ -40,7 +45,7 @@ const SUBTITLES: Record<ViewId, string> = {
   programming: 'تقييمات برمجية في بيئة معزولة مع تحليل ثابت وكشف الانتحال',
   math: 'تصحيح رياضي خطوة بخطوة مع التعرّف على الخط وتقييم جزئي',
   analytics: 'ذكاء أعمال تنفيذي وفرعي وإداري',
-  certification: 'شهادات واعتمادات رقمية موثّقة بالبلوكشين',
+  certification: 'شهادات واعتمادات رقمية موثّقة من السجل',
   marketplace: 'شراء وبيع الدورات وبنوك الأسئلة وقوالب الامتحانات',
   sis: 'نظام معلومات الطلاب مع التنبؤ بالمخاطر والتفاعل',
   parents: 'تتبع تقدّم الأبناء وإشعارات فورية عبر واتساب',
@@ -78,26 +83,42 @@ function requestedViewFromUrl(): ViewId {
 }
 
 function AppContent() {
-  const { user, role, loading, isActive, signOut } = useAuth();
+  const { user, role, institutionId, loading, isActive, isPasswordRecovery, signOut } = useAuth();
   const [view, setViewState] = useState<ViewId>(() => requestedViewFromUrl());
   const [collapsed, setCollapsed] = useState(false);
-  const [bootstrapLoading, setBootstrapLoading] = useState(false);
-  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
-
-  async function handleBootstrap() {
-    setBootstrapLoading(true);
-    setBootstrapError(null);
-    const { error } = await bootstrapFirstAdmin();
-    if (error) {
-      setBootstrapError(error.message === 'bootstrap_already_completed'
-        ? 'تم إعداد مدير النظام بالفعل. استخدم حساب المدير لتفعيل هذا الحساب.'
-        : error.message);
-      setBootstrapLoading(false);
-      return;
+  const [showAuth, setShowAuth] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authSignupType, setAuthSignupType] = useState<'institution' | 'existing'>('institution');
+  const [institutionLogo, setInstitutionLogo] = useState<string | null>(null);
+  useEffect(() => {
+    let mounted = true;
+    if (!institutionId) {
+      applyInstitutionTheme();
+      setInstitutionLogo(null);
+      return () => { mounted = false; };
     }
-    window.location.reload();
-  }
-
+    void supabase.from('institutions').select('settings, logo_url').eq('id', institutionId).maybeSingle().then(async ({ data }) => {
+      if (!mounted) return;
+      const row = data as { settings?: { primaryColor?: string }; logo_url?: string | null } | null;
+      const settings = row?.settings;
+      applyInstitutionTheme(settings?.primaryColor);
+      const logoPath = row?.logo_url ?? null;
+      if (!logoPath) {
+        setInstitutionLogo(null);
+        return;
+      }
+      if (logoPath.startsWith('http')) {
+        setInstitutionLogo(logoPath);
+        return;
+      }
+      const { data: signed } = await supabase.storage.from('public-assets').createSignedUrl(logoPath, 60 * 60);
+      if (mounted) setInstitutionLogo(signed?.signedUrl ?? null);
+    });
+    return () => { mounted = false; };
+  }, [institutionId]);
+  useEffect(() => {
+    if (user) trackMarketingEvent('page_view', { app_view: view, role: role === 'anonymous' ? undefined : role });
+  }, [role, user, view]);
   function setView(next: ViewId) {
     setViewState(next);
     if (typeof window !== 'undefined') {
@@ -115,8 +136,20 @@ function AppContent() {
     );
   }
 
-  if (!user) {
+  if (isPasswordRecovery && user) {
     return <Auth />;
+  }
+
+  if (!user) {
+    if (!showAuth && !isPasswordRecovery) {
+      return (
+        <LandingPage
+          onStart={(signupType) => { setAuthMode('signup'); setAuthSignupType(signupType); setShowAuth(true); }}
+          onLogin={() => { setAuthMode('login'); setShowAuth(true); }}
+        />
+      );
+    }
+    return <Auth initialMode={authMode} initialSignupType={authSignupType} onBackToLanding={() => setShowAuth(false)} />;
   }
 
   if (!isActive && role !== 'super_admin') {
@@ -128,14 +161,9 @@ function AppContent() {
           </div>
           <h2 className="font-display text-xl font-700 text-ink-900 mb-2">حسابك قيد المراجعة</h2>
           <p className="text-sm text-ink-500">سيتم تفعيل حسابك من مدير المؤسسة. ستصلك إشعار عند التفعيل.</p>
-          <button type="button" onClick={handleBootstrap} disabled={bootstrapLoading} className="btn-primary mt-5 w-full justify-center disabled:opacity-60">
-            {bootstrapLoading ? <Loader2 size={17} className="animate-spin" /> : <ShieldCheck size={17} />}
-            تفعيل أول مدير للنظام
-          </button>
           <button type="button" onClick={() => void signOut()} className="btn-outline mt-3 w-full justify-center">
             العودة لتسجيل الدخول بحساب آخر
           </button>
-          {bootstrapError && <p className="text-sm text-danger-600 mt-3">{bootstrapError}</p>}
         </div>
       </div>
     );
@@ -147,9 +175,9 @@ function AppContent() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-ink-50">
-      <Sidebar active={safeView} onSelect={setView} collapsed={collapsed} onToggleCollapse={() => setCollapsed(!collapsed)} accessibleViews={accessibleViews} />
+      <Sidebar active={safeView} onSelect={setView} collapsed={collapsed} onToggleCollapse={() => setCollapsed(!collapsed)} accessibleViews={accessibleViews} institutionLogo={institutionLogo} />
       <div className="flex-1 flex flex-col min-w-0">
-        <MobileNav active={safeView} onSelect={setView} accessibleViews={accessibleViews} />
+        <MobileNav active={safeView} onSelect={setView} accessibleViews={accessibleViews} institutionLogo={institutionLogo} />
         <Topbar title={activeItem?.label ?? 'إكزاميفاي AI'} subtitle={SUBTITLES[safeView]} onNavigate={setView} accessibleViews={accessibleViews} onCreateExam={() => setView('exambuilder')} />
         <main className="flex-1 overflow-y-auto">
           <div key={safeView} className="animate-fade-in p-5 lg:p-8 max-w-[1600px] mx-auto">
@@ -165,7 +193,7 @@ function AppContent() {
             {safeView === 'marketplace' && <Marketplace />}
             {safeView === 'sis' && <SIS />}
             {safeView === 'parents' && <Parents />}
-            {safeView === 'settings' && <Settings />}
+            {safeView === 'settings' && <Settings onLogoChange={setInstitutionLogo} />}
             {safeView === 'questionbank' && <QuestionBank />}
             {safeView === 'exambuilder' && <ExamBuilder />}
             {safeView === 'examrunner' && <ExamRunner />}
@@ -186,8 +214,10 @@ function AppContent() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
+    <FeedbackProvider>
+      <AuthProvider>
+        <MfaGate><AppContent /></MfaGate>
+      </AuthProvider>
+    </FeedbackProvider>
   );
 }

@@ -15,6 +15,7 @@ export interface OmrScanResult {
   engine?: string;
   engineVersion?: string | null;
   jobId?: string | null;
+  omrResultId?: string | null;
   documentConfidence?: number;
   warnings?: string[];
   annotatedStoragePath?: string | null;

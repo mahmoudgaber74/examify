@@ -16,6 +16,9 @@ test.describe('Reports', () => {
     const attemptA = psqlScalar('select gen_random_uuid();');
     const attemptB = psqlScalar('select gen_random_uuid();');
     const attemptUnpublished = psqlScalar('select gen_random_uuid();');
+    const answerA = psqlScalar('select gen_random_uuid();');
+    const questionA = psqlScalar(`select question_id::text from public.exam_questions where exam_id = ${sqlValue(s.ids.examA)}::uuid order by sort_order limit 1;`);
+    const examTotalPoints = psqlScalar(`select total_points::text from public.examify_exams where id = ${sqlValue(s.ids.examA)}::uuid;`);
 
     psqlScalar(`
       insert into public.examify_exams (id, institution_id, subject_id, class_id, title, total_points, passing_score, duration_minutes, status)
@@ -23,10 +26,14 @@ test.describe('Reports', () => {
       alter table public.exam_attempts disable trigger trg_enforce_exam_attempt_canonical_write;
       insert into public.exam_attempts (id, exam_id, student_id, attempt_number, status, submitted_at, score, score_percentage, is_passed, is_result_published)
       values
-        (${sqlValue(attemptA)}::uuid, ${sqlValue(s.ids.examA)}::uuid, ${sqlValue(s.ids.studentAProfile)}::uuid, 10, 'approved', '2026-08-05T10:00:00Z', 80, 80, true, true),
-        (${sqlValue(attemptB)}::uuid, ${sqlValue(s.ids.examA)}::uuid, ${sqlValue(s.ids.studentBProfile)}::uuid, 10, 'approved', '2026-08-05T11:00:00Z', 40, 40, false, true),
+        (${sqlValue(attemptA)}::uuid, ${sqlValue(s.ids.examA)}::uuid, ${sqlValue(s.ids.studentAProfile)}::uuid, 10, 'approved', '2026-08-05T10:00:00Z', (${sqlValue(examTotalPoints)}::numeric * 0.8), 80, true, true),
+        (${sqlValue(attemptB)}::uuid, ${sqlValue(s.ids.examA)}::uuid, ${sqlValue(s.ids.studentBProfile)}::uuid, 10, 'approved', '2026-08-05T11:00:00Z', (${sqlValue(examTotalPoints)}::numeric * 0.4), 40, false, true),
         (${sqlValue(attemptUnpublished)}::uuid, ${sqlValue(examOther)}::uuid, ${sqlValue(s.ids.studentAProfile)}::uuid, 10, 'graded', '2026-08-04T10:00:00Z', 90, 90, true, false);
       alter table public.exam_attempts enable trigger trg_enforce_exam_attempt_canonical_write;
+      alter table public.answers disable trigger trg_enforce_answer_canonical_write;
+      insert into public.answers (id, attempt_id, question_id, text_answer, is_correct, awarded_points)
+      values (${sqlValue(answerA)}::uuid, ${sqlValue(attemptA)}::uuid, ${sqlValue(questionA)}::uuid, 'إجابة اختبارية للتقارير', true, 1);
+      alter table public.answers enable trigger trg_enforce_answer_canonical_write;
       select 'ok';
     `);
 
@@ -59,7 +66,16 @@ test.describe('Reports', () => {
     await page.getByTestId('reports-export-pdf').click();
     expect((await pdfDownload).suggestedFilename()).toMatch(/\.pdf$/);
 
+    const responsesPdfDownload = page.waitForEvent('download');
+    await page.getByTestId('reports-export-responses-pdf').click();
+    expect((await responsesPdfDownload).suggestedFilename()).toMatch(/student-responses.*\.pdf$/);
+
+    const comparisonPdfDownload = page.waitForEvent('download');
+    await page.getByTestId('reports-export-comparison-pdf').click();
+    expect((await comparisonPdfDownload).suggestedFilename()).toMatch(/grade-comparison.*\.pdf$/);
+
     psqlScalar(`
+      delete from public.answers where id = ${sqlValue(answerA)}::uuid;
       delete from public.exam_attempts where id in (${sqlValue(attemptA)}::uuid, ${sqlValue(attemptB)}::uuid, ${sqlValue(attemptUnpublished)}::uuid);
       delete from public.examify_exams where id = ${sqlValue(examOther)}::uuid;
       select 'ok';

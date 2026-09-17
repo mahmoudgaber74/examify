@@ -3,6 +3,7 @@ import io
 import json
 import hashlib
 import hmac
+import os
 import time
 
 import cv2
@@ -64,7 +65,8 @@ def image_payload(image: bytes, request_id: str = "synthetic-request-001") -> di
 def signed_headers(body: bytes, request_id: str) -> dict:
     timestamp = str(time.time())
     body_hash = hashlib.sha256(body).hexdigest()
-    signature = hmac.new(b"local-omr-development-token", f"{timestamp}.{request_id}.{body_hash}".encode(), hashlib.sha256).hexdigest()
+    signing_key = os.environ.get("OMR_SERVICE_TOKEN", "local-omr-development-token").encode()
+    signature = hmac.new(signing_key, f"{timestamp}.{request_id}.{body_hash}".encode(), hashlib.sha256).hexdigest()
     return {
         "X-OMR-Request-Id": request_id,
         "X-OMR-Timestamp": timestamp,

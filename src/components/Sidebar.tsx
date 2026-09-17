@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NAV_ITEMS, GROUP_ORDER, type ViewId } from '../lib/navigation';
-import { Sparkles, ChevronRight, ChevronLeft, ChevronDown } from 'lucide-react';
+import { Sparkles, ChevronRight, ChevronLeft, ChevronDown, LogOut, UserRound } from 'lucide-react';
 import { useAuth } from './AuthProvider';
 
 interface SidebarProps {
@@ -9,9 +9,10 @@ interface SidebarProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
   accessibleViews: ViewId[];
+  institutionLogo?: string | null;
 }
 
-export function Sidebar({ active, onSelect, collapsed, onToggleCollapse, accessibleViews }: SidebarProps) {
+export function Sidebar({ active, onSelect, collapsed, onToggleCollapse, accessibleViews, institutionLogo }: SidebarProps) {
   const { fullName, role, signOut } = useAuth();
   const activeGroup = NAV_ITEMS.find((item) => item.id === active)?.group;
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(() => ({ [GROUP_ORDER[0]]: true }));
@@ -22,9 +23,9 @@ export function Sidebar({ active, onSelect, collapsed, onToggleCollapse, accessi
 
   return (
     <aside className={`hidden lg:flex flex-col bg-ink-950 text-ink-200 transition-all duration-300 ${collapsed ? 'w-[76px]' : 'w-[260px]'}`}>
-      <div className="flex items-center gap-2.5 px-5 h-16 border-b border-white/5">
-        <div className="grid place-items-center w-9 h-9 rounded-xl bg-brand-600 text-white shrink-0">
-          <Sparkles size={18} />
+        <div className="flex items-center gap-2.5 px-5 h-16 border-b border-white/5">
+        <div className="grid place-items-center w-9 h-9 rounded-xl bg-brand-600 text-white shrink-0 overflow-hidden">
+          {institutionLogo ? <img src={institutionLogo} alt="شعار المؤسسة" className="h-full w-full object-contain bg-white" /> : <Sparkles size={18} />}
         </div>
         {!collapsed && (
           <div className="leading-tight">
@@ -40,7 +41,7 @@ export function Sidebar({ active, onSelect, collapsed, onToggleCollapse, accessi
           if (!items.length) return null;
           return (
             <div key={group}>
-              {!collapsed && <button type="button" onClick={() => setOpenGroups((groups) => ({ ...groups, [group]: !groups[group] }))} className="flex w-full items-center justify-between px-3 mb-1.5 text-[10px] font-700 tracking-widest text-ink-500 hover:text-ink-300 transition" aria-expanded={openGroups[group] !== false}>
+              {!collapsed && <button type="button" onClick={() => setOpenGroups((groups) => ({ ...groups, [group]: !groups[group] }))} className="flex w-full items-center justify-between px-3 mb-1.5 text-[10px] font-700 tracking-widest text-ink-400 hover:text-ink-200 transition" aria-expanded={openGroups[group] !== false}>
                 <span>{group}</span><ChevronDown size={14} className={`transition-transform ${openGroups[group] === false ? '-rotate-90' : ''}`} />
               </button>}
               <div className={`space-y-0.5 ${!collapsed && openGroups[group] === false ? 'hidden' : ''}`}>
@@ -53,7 +54,7 @@ export function Sidebar({ active, onSelect, collapsed, onToggleCollapse, accessi
                       onClick={() => onSelect(item.id)}
                       title={collapsed ? item.label : undefined}
                       data-testid={`nav-${item.id}`}
-                      className={`nav-link w-full ${isActive ? 'nav-link-active !text-white !bg-brand-600/20' : ''} ${collapsed ? 'justify-center px-2' : ''}`}
+                      className={`nav-link w-full !text-ink-300 hover:!bg-white/10 hover:!text-white ${isActive ? 'nav-link-active !text-white !bg-brand-600/30 shadow-soft ring-1 ring-brand-400/20' : ''} ${collapsed ? 'justify-center px-2' : ''}`}
                     >
                       <Icon size={18} className="shrink-0" />
                       {!collapsed && <span className="truncate">{item.label}</span>}
@@ -69,19 +70,28 @@ export function Sidebar({ active, onSelect, collapsed, onToggleCollapse, accessi
         })}
       </nav>
 
-      <div className="px-3 py-3 border-t border-white/5">
+      <div className="px-3 py-4 border-t border-white/10">
         {!collapsed && fullName && (
-          <div className="px-3 py-2 mb-2">
-            <div className="text-xs text-ink-400">{roleLabel(role)}</div>
-            <div className="text-sm font-600 text-white truncate">{fullName}</div>
+          <div className="mb-3 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3">
+            <div className="flex items-center gap-2.5">
+              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand-500/20 text-brand-300">
+                <UserRound size={18} />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[11px] text-ink-400">{roleLabel(role)}</div>
+                <div className="mt-0.5 truncate text-sm font-600 text-white">{fullName}</div>
+              </div>
+            </div>
           </div>
         )}
-        <button onClick={onToggleCollapse} className="nav-link w-full text-ink-400 hover:text-white">
+        <div className="space-y-1.5">
+        <button onClick={onToggleCollapse} className="nav-link w-full !min-h-11 !rounded-xl !text-ink-300 hover:!bg-white/10 hover:!text-white">
           {collapsed ? <ChevronLeft size={18} className="mx-auto" /> : <><ChevronRight size={18} /><span>طيّ القائمة</span></>}
         </button>
-        <button onClick={signOut} data-testid="auth-logout" className="nav-link w-full text-ink-400 hover:text-danger-400 mt-1">
-          {collapsed ? <ChevronLeft size={18} className="mx-auto rotate-90" /> : <><ChevronRight size={18} className="rotate-90" /><span>تسجيل الخروج</span></>}
+        <button onClick={signOut} data-testid="auth-logout" className="nav-link w-full !min-h-11 !rounded-xl !text-ink-300 hover:!bg-danger-500/10 hover:!text-danger-300">
+          {collapsed ? <LogOut size={18} className="mx-auto" /> : <><LogOut size={18} /><span>تسجيل الخروج</span></>}
         </button>
+        </div>
       </div>
     </aside>
   );
@@ -91,9 +101,10 @@ interface MobileNavProps {
   active: ViewId;
   onSelect: (id: ViewId) => void;
   accessibleViews: ViewId[];
+  institutionLogo?: string | null;
 }
 
-export function MobileNav({ active, onSelect, accessibleViews }: MobileNavProps) {
+export function MobileNav({ active, onSelect, accessibleViews, institutionLogo }: MobileNavProps) {
   const [open, setOpen] = useState(false);
   const activeGroup = NAV_ITEMS.find((item) => item.id === active)?.group;
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(() => ({ [GROUP_ORDER[0]]: true }));
@@ -106,10 +117,10 @@ export function MobileNav({ active, onSelect, accessibleViews }: MobileNavProps)
     <>
       <div className="lg:hidden sticky top-0 z-30 bg-ink-950 text-white px-4 h-14 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="grid place-items-center w-8 h-8 rounded-lg bg-brand-600"><Sparkles size={16} /></div>
+          <div className="grid place-items-center w-8 h-8 rounded-lg bg-brand-600 overflow-hidden">{institutionLogo ? <img src={institutionLogo} alt="شعار المؤسسة" className="h-full w-full object-contain bg-white" /> : <Sparkles size={16} />}</div>
           <span className="font-display font-800 text-sm">إكزاميفاي AI</span>
         </div>
-        <button data-testid="mobile-nav-toggle" onClick={() => setOpen(!open)} className="text-sm font-600 text-ink-200">
+        <button data-testid="mobile-nav-toggle" onClick={() => setOpen(!open)} className="text-sm font-600 text-ink-100 hover:text-white">
           {activeItem?.label ?? 'القائمة'}
         </button>
       </div>
@@ -120,22 +131,22 @@ export function MobileNav({ active, onSelect, accessibleViews }: MobileNavProps)
               const items = NAV_ITEMS.filter((item) => item.group === group && accessibleViews.includes(item.id));
               if (!items.length) return null;
               return <div key={group} className="mb-3">
-                <button type="button" onClick={() => setOpenGroups((groups) => ({ ...groups, [group]: !groups[group] }))} className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-700 tracking-wide text-ink-400" aria-expanded={openGroups[group] !== false}>
+                <button type="button" onClick={() => setOpenGroups((groups) => ({ ...groups, [group]: !groups[group] }))} className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-700 tracking-wide text-ink-300 hover:text-ink-100" aria-expanded={openGroups[group] !== false}>
                   <span>{group}</span><ChevronDown size={15} className={`transition-transform ${openGroups[group] === false ? '-rotate-90' : ''}`} />
                 </button>
                 <div className={`space-y-1 ${openGroups[group] === false ? 'hidden' : ''}`}>
                   {items.map((item) => {
                     const Icon = item.icon;
-                    return <button key={item.id} data-testid={`nav-${item.id}`} onClick={() => { onSelect(item.id); setOpen(false); }} className={`nav-link w-full ${active === item.id ? 'nav-link-active' : ''}`}><Icon size={18} /><span>{item.label}</span></button>;
+                    return <button key={item.id} data-testid={`nav-${item.id}`} onClick={() => { onSelect(item.id); setOpen(false); }} className={`nav-link w-full !text-ink-200 hover:!bg-white/10 hover:!text-white ${active === item.id ? 'nav-link-active !bg-brand-600/30 !text-white' : ''}`}><Icon size={18} /><span>{item.label}</span></button>;
                   })}
                 </div>
               </div>;
             })}
             {fullName && (
               <div className="pt-3 mt-3 border-t border-white/10">
-                <div className="text-xs text-ink-400 px-3">{roleLabel(role)}</div>
+                <div className="text-xs text-ink-300 px-3">{roleLabel(role)}</div>
                 <div className="text-sm font-600 text-white px-3 py-1">{fullName}</div>
-                <button onClick={signOut} data-testid="auth-logout" className="nav-link w-full text-danger-400 mt-1">
+                <button onClick={signOut} data-testid="auth-logout" className="nav-link w-full !text-danger-300 hover:!bg-danger-500/10 hover:!text-danger-200 mt-1">
                   <ChevronRight size={18} className="rotate-90" /><span>تسجيل الخروج</span>
                 </button>
               </div>

@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Plus, Search, Trash2, Edit3, Loader2, AlertCircle, Clock, Calendar, Send, X, Check, Zap } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Plus, Search, Trash2, Edit3, Loader2, AlertCircle, Clock, Calendar, Send, X, Check, Zap, ArrowRight } from 'lucide-react';
 import { Card, SectionHeader, Badge, EmptyState } from '../components/ui';
+import { Select as DropdownSelect } from '../components/ui/Select';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
 import type { UserRole } from '../lib/auth';
 import { ar, getArabicErrorMessage } from '../lib/translate';
+import { useFeedback } from '../components/FeedbackProvider';
 
 interface ExamRow {
   id: string;
@@ -33,6 +35,66 @@ interface GradeSubjectRow { id: string; academic_year_id: string; grade_level_id
 interface SubjectTeacherRow { id: string; subject_id: string; class_id: string; teacher_id: string; section_id: string | null; is_active: boolean; }
 interface QuestionRow { id: string; type: string; prompt: string; difficulty: string; points: number; }
 interface ExamQuestionRow { id: string; question_id: string; points: number; sort_order: number; questions: { prompt: string; type: string; }; }
+
+function extractSavedQuestionId(data: unknown): string | null {
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row || typeof row !== 'object') return null;
+  const response = row as { question_id?: unknown; id?: unknown; question?: { id?: unknown } };
+  if (typeof response.question_id === 'string' && response.question_id.trim()) return response.question_id;
+  if (typeof response.id === 'string' && response.id.trim()) return response.id;
+  if (typeof response.question?.id === 'string' && response.question.id.trim()) return response.question.id;
+  return null;
+}
+
+function formatScore(value: number) {
+  return Number(value.toFixed(2)).toString();
+}
+
+function formatQuestionPointsMismatch(configuredTotal: number, questionPointsTotal: number) {
+  const remaining = configuredTotal - questionPointsTotal;
+  if (remaining > 0) return `لا يمكن نشر الامتحان. مجموع درجات الأسئلة هو ${formatScore(questionPointsTotal)} من ${formatScore(configuredTotal)}. متبقي توزيع ${formatScore(remaining)} درجة.`;
+  if (remaining < 0) return `لا يمكن نشر الامتحان. مجموع درجات الأسئلة يتجاوز الدرجة الكلية بمقدار ${formatScore(Math.abs(remaining))} درجة.`;
+  return 'لا يمكن نشر الامتحان. تحقق من توزيع درجات الأسئلة.';
+}
+
+function getExamPublishValidationMessage(input: {
+  title?: string | null;
+  subjectId?: string | null;
+  totalPoints: number;
+  passingScore: number;
+  duration: number;
+  questionPoints: number[];
+}) {
+  if (!input.subjectId) return 'لا يمكن نشر الامتحان قبل اختيار المادة.';
+  if (input.questionPoints.length === 0) return 'لا يمكن نشر الامتحان قبل إضافة سؤال واحد على الأقل.';
+  if (!Number.isFinite(input.totalPoints) || input.totalPoints <= 0) return 'الدرجة الكلية للامتحان يجب أن تكون أكبر من صفر.';
+  if (input.questionPoints.some((points) => !Number.isFinite(points) || points <= 0)) return 'يجب أن تكون درجة كل سؤال أكبر من صفر.';
+  const questionPointsTotal = input.questionPoints.reduce((sum, points) => sum + points, 0);
+  if (questionPointsTotal !== input.totalPoints) return formatQuestionPointsMismatch(input.totalPoints, questionPointsTotal);
+  if (!Number.isFinite(input.passingScore) || input.passingScore < 0 || input.passingScore > 100) return 'نسبة النجاح يجب أن تكون بين 0 و100%.';
+  if (!Number.isFinite(input.duration) || input.duration <= 0) return 'مدة الامتحان يجب أن تكون أكبر من صفر دقيقة.';
+  if (!input.title?.trim()) return 'يجب إدخال عنوان الامتحان قبل النشر.';
+  return null;
+}
+
+function getExamPublishErrorMessage(error: unknown) {
+  const message = error && typeof error === 'object' && typeof (error as { message?: unknown }).message === 'string'
+    ? (error as { message: string }).message
+    : '';
+  if (message.includes('exam_question_points_mismatch')) {
+    const configured = message.match(/configured_total=([0-9]+(?:\.[0-9]+)?)/)?.[1];
+    const questionTotal = message.match(/question_points_total=([0-9]+(?:\.[0-9]+)?)/)?.[1];
+    if (configured && questionTotal) {
+      const configuredLabel = Number(configured).toString();
+      const questionTotalLabel = Number(questionTotal).toString();
+      return formatQuestionPointsMismatch(Number(configuredLabel), Number(questionTotalLabel));
+    }
+  }
+  if (message.includes('exam_not_ready_for_publication')) {
+    return 'لا يمكن نشر الامتحان. أكمل البيانات وتأكد من وجود أسئلة بنقاط موجبة ودرجة نجاح من 0 إلى 100%.';
+  }
+  return getArabicErrorMessage(error);
+}
 
 function addMinutesToDateTimeLocal(value: string, minutes: number) {
   const date = new Date(value);
@@ -64,6 +126,7 @@ const STATUS_LABELS: Record<string, { label: string; tone: 'neutral' | 'brand' |
 
 export function ExamBuilder() {
   const { institutionId, role, user } = useAuthSafe();
+  const { confirm } = useFeedback();
   const canEdit = ['super_admin', 'school_admin', 'teacher'].includes(role as UserRole);
   const [exams, setExams] = useState<ExamRow[]>([]);
   const [subjects, setSubjects] = useState<SubjectRow[]>([]);
@@ -167,7 +230,7 @@ export function ExamBuilder() {
   const activeSubjects = subjects.filter((subject) => subject.is_active);
 
   async function handleDelete(id: string) {
-    if (!confirm(ar.examBuilder.deleteConfirm)) return;
+    if (!(await confirm(ar.examBuilder.deleteConfirm, { title: 'حذف الامتحان', confirmLabel: 'حذف الامتحان' }))) return;
     const { error: err } = await supabase.from('examify_exams').delete().eq('id', id);
     if (err) {
       console.error('Exam delete failed', err);
@@ -179,21 +242,31 @@ export function ExamBuilder() {
 
   async function handleStatusChange(id: string, status: string) {
     if (status === 'published') {
-      const [{ data: exam, error: examError }, { count, error: questionsError }] = await Promise.all([
+      const [{ data: exam, error: examError }, { data: questionRows, error: questionsError }] = await Promise.all([
         supabase.from('examify_exams').select('title, subject_id, total_points, passing_score, duration_minutes').eq('id', id).single(),
-        supabase.from('exam_questions').select('id', { count: 'exact', head: true }).eq('exam_id', id),
+        supabase.from('exam_questions').select('points').eq('exam_id', id),
       ]);
       if (examError || questionsError) { setError(getArabicErrorMessage(examError || questionsError)); return; }
-      if (!exam?.title?.trim() || !exam.subject_id || Number(exam.total_points) <= 0 || Number(exam.passing_score) < 0 || Number(exam.passing_score) > Number(exam.total_points) || Number(exam.duration_minutes) <= 0 || !count) {
-        setError('لا يمكن نشر الامتحان قبل اختيار المادة وإضافة سؤال واحد على الأقل والتأكد من صحة الدرجات والمدة.');
+      const publishValidationError = getExamPublishValidationMessage({
+        title: exam?.title,
+        subjectId: exam?.subject_id,
+        totalPoints: Number(exam?.total_points),
+        passingScore: Number(exam?.passing_score),
+        duration: Number(exam?.duration_minutes),
+        questionPoints: ((questionRows as { points: number }[]) ?? []).map((row) => Number(row.points)),
+      });
+      if (publishValidationError) {
+        setError(publishValidationError);
         return;
       }
-      if (!confirm('هل تريد نشر الامتحان الآن؟')) return;
+      if (!(await confirm('هل تريد نشر الامتحان الآن؟', { title: 'نشر الامتحان', confirmLabel: 'نشر الامتحان', tone: 'brand' }))) return;
     }
-    const { error: err } = await supabase.from('examify_exams').update({ status }).eq('id', id);
+    const { error: err } = status === 'published'
+      ? await supabase.rpc('publish_exam', { p_exam_id: id })
+      : await supabase.from('examify_exams').update({ status }).eq('id', id);
     if (err) {
       console.error('Exam status update failed', err);
-      setError(getArabicErrorMessage(err));
+      setError(status === 'published' ? getExamPublishErrorMessage(err) : getArabicErrorMessage(err));
       return;
     }
     setExams((prev) => prev.map((exam) => exam.id === id ? { ...exam, status } : exam));
@@ -203,26 +276,66 @@ export function ExamBuilder() {
     return <div className="card p-8 text-center text-ink-500">{ar.questionBank.loadingInstitution}</div>;
   }
 
+  if (showEditor) {
+    return (
+      <ExamEditor
+        institutionId={institutionId}
+        subjects={editing ? subjects.filter((subject) => subject.is_active || subject.id === editing.subject_id) : activeSubjects}
+        classes={classes}
+        sections={sections}
+        gradeSubjects={gradeSubjects}
+        teacherAssignments={teacherAssignments}
+        editing={editing}
+        onClose={() => setShowEditor(false)}
+        onSaved={async () => {
+          const refreshed = await loadExams();
+          if (!refreshed) throw new Error('Unable to refresh the exam list after saving.');
+          setShowEditor(false);
+          setEditing(null);
+        }}
+      />
+    );
+  }
+
+  if (showQuickExam) {
+    return (
+      <QuickExamModal
+        institutionId={institutionId}
+        subjects={activeSubjects}
+        classes={classes}
+        sections={sections}
+        gradeSubjects={gradeSubjects}
+        teacherAssignments={teacherAssignments}
+        onClose={() => setShowQuickExam(false)}
+        onSaved={() => { setShowQuickExam(false); loadExams(); }}
+      />
+    );
+  }
+
   return (
     <div className="space-y-5">
       <SectionHeader
         title={ar.examBuilder.title}
         subtitle={ar.examBuilder.subtitle}
-        action={canEdit && (
-          <button data-testid="exam-add" onClick={() => { setEditing(null); setShowEditor(true); }} className="btn-primary">
-            <Plus size={16} /> {ar.examBuilder.newExam}
-          </button>
-        )}
       />
 
       {canEdit && (
-        <Card className="p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-          <div>
-            <h3 className="font-700 text-ink-900">{ar.examBuilder.quickExam}</h3>
-            <p className="text-sm text-ink-500 mt-1">{ar.examBuilder.quickExamDescription}</p>
-          </div>
-          <button data-testid="quick-exam-open" onClick={() => setShowQuickExam(true)} className="btn-primary shrink-0">
-            <Zap size={16} /> {ar.examBuilder.startQuickExam}
+        <Card className="grid gap-3 p-3 sm:grid-cols-2 sm:p-4">
+          <button data-testid="exam-add" onClick={() => { setEditing(null); setShowEditor(true); }} className="group flex min-h-32 items-center gap-4 rounded-2xl border border-brand-100 bg-brand-50/60 p-5 text-right transition hover:border-brand-300 hover:bg-brand-50 hover:shadow-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
+            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-brand-600 text-white shadow-soft"><Plus size={21} /></span>
+            <span className="min-w-0 flex-1">
+              <span className="mb-1 block text-xs font-semibold text-brand-700">تحكم كامل</span>
+              <span className="block font-700 text-ink-900">{ar.examBuilder.newExam}</span>
+              <span className="mt-1 block text-sm leading-6 text-ink-500">{ar.examBuilder.newExamDescription}</span>
+            </span>
+          </button>
+          <button data-testid="quick-exam-open" onClick={() => setShowQuickExam(true)} className="group flex min-h-32 items-center gap-4 rounded-2xl border border-ink-200 bg-white p-5 text-right transition hover:border-brand-300 hover:bg-brand-50/50 hover:shadow-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
+            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-ink-900 text-white shadow-soft"><Zap size={21} /></span>
+            <span className="min-w-0 flex-1">
+              <span className="mb-1 block text-xs font-semibold text-ink-500">للاختبارات الورقية</span>
+              <span className="block font-700 text-ink-900">{ar.examBuilder.quickExam}</span>
+              <span className="mt-1 block text-sm leading-6 text-ink-500">{ar.examBuilder.quickExamDescription}</span>
+            </span>
           </button>
         </Card>
       )}
@@ -234,16 +347,20 @@ export function ExamBuilder() {
         </div>
       )}
 
-      <Card className="p-4">
-        <div className="flex flex-wrap gap-3 items-center">
-          <div className="flex items-center gap-2 flex-1 min-w-[200px]">
+      <Card className="p-4 sm:p-5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          <div className="flex min-w-[200px] flex-1 items-center gap-2">
             <Search size={16} className="text-ink-400" />
-            <input className="input !py-2" placeholder={ar.examBuilder.searchPlaceholder} value={search} onChange={(event) => setSearch(event.target.value)} />
+            <input className="input h-12 !py-0" placeholder={ar.examBuilder.searchPlaceholder} value={search} onChange={(event) => setSearch(event.target.value)} />
           </div>
-          <select className="input !py-2 !w-auto" value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}>
-            <option value="all">{ar.common.allStatuses}</option>
-            {Object.entries(STATUS_LABELS).map(([value, status]) => <option key={value} value={value}>{status.label}</option>)}
-          </select>
+          <DropdownSelect
+            value={filterStatus}
+            onValueChange={setFilterStatus}
+            options={[{ value: 'all', label: ar.common.allStatuses }, ...Object.entries(STATUS_LABELS).map(([value, status]) => ({ value, label: status.label }))]}
+            ariaLabel="فلترة الاختبارات حسب الحالة"
+            testId="exam-filter-status"
+            className="w-full sm:w-56"
+          />
         </div>
       </Card>
 
@@ -295,36 +412,6 @@ export function ExamBuilder() {
         </div>
       )}
 
-      {showEditor && (
-        <ExamEditor
-          institutionId={institutionId}
-          subjects={editing ? subjects.filter((subject) => subject.is_active || subject.id === editing.subject_id) : activeSubjects}
-          classes={classes}
-          sections={sections}
-          gradeSubjects={gradeSubjects}
-          teacherAssignments={teacherAssignments}
-          editing={editing}
-          onClose={() => setShowEditor(false)}
-          onSaved={async () => {
-            const refreshed = await loadExams();
-            if (!refreshed) throw new Error('Unable to refresh the exam list after saving.');
-            setShowEditor(false);
-            setEditing(null);
-          }}
-        />
-      )}
-      {showQuickExam && (
-        <QuickExamModal
-          institutionId={institutionId}
-          subjects={activeSubjects}
-          classes={classes}
-          sections={sections}
-          gradeSubjects={gradeSubjects}
-          teacherAssignments={teacherAssignments}
-          onClose={() => setShowQuickExam(false)}
-          onSaved={() => { setShowQuickExam(false); loadExams(); }}
-        />
-      )}
     </div>
   );
 }
@@ -389,6 +476,8 @@ function ExamEditor({ institutionId, subjects, classes, sections, gradeSubjects,
       return assignedToGrade && assignedToTeacher;
     })
     : subjects;
+  const questionPointsTotal = examQuestions.reduce((sum, question) => sum + Number(question.points), 0);
+  const pointsRemaining = Number(totalPoints) - questionPointsTotal;
 
   const loadBankQuestions = useCallback(async () => {
     if (!institutionId || !subjectId) return;
@@ -422,11 +511,16 @@ function ExamEditor({ institutionId, subjects, classes, sections, gradeSubjects,
     if (!title.trim()) { setError(ar.examBuilder.examTitleRequired); setSaving(false); return; }
     if (!subjectId) { setError('اختر المادة قبل حفظ الامتحان.'); setSaving(false); return; }
     if (!Number.isFinite(Number(totalPoints)) || Number(totalPoints) <= 0) { setError('الدرجة النهائية يجب أن تكون أكبر من صفر.'); setSaving(false); return; }
-    if (!Number.isFinite(Number(passingScore)) || Number(passingScore) < 0 || Number(passingScore) > Number(totalPoints)) { setError('درجة النجاح يجب أن تكون بين صفر والدرجة النهائية.'); setSaving(false); return; }
+    if (!Number.isFinite(Number(passingScore)) || Number(passingScore) < 0 || Number(passingScore) > 100) { setError('نسبة النجاح يجب أن تكون بين 0 و100%.'); setSaving(false); return; }
     if (!Number.isFinite(Number(duration)) || Number(duration) <= 0) { setError('مدة الامتحان يجب أن تكون أكبر من صفر دقيقة.'); setSaving(false); return; }
     if (!Number.isInteger(Number(maxAttempts)) || Number(maxAttempts) < 1) { setError('عدد المحاولات يجب أن يكون رقمًا صحيحًا يبدأ من 1.'); setSaving(false); return; }
     if (endAt && !startAt) { setError('حدد وقت البداية أولًا قبل وقت النهاية.'); setSaving(false); return; }
     if (startAt && endAt && !minutesBetween(startAt, endAt)) { setError('وقت النهاية يجب أن يكون بعد وقت البداية.'); setSaving(false); return; }
+    if (status === 'published' && (examQuestions.length === 0 || questionPointsTotal <= 0 || pointsRemaining !== 0 || examQuestions.some((question) => Number(question.points) <= 0))) {
+      setError('يجب أن يساوي مجموع نقاط الأسئلة الدرجة النهائية قبل النشر.');
+      setSaving(false);
+      return;
+    }
 
     const examData = {
       institution_id: institutionId,
@@ -488,6 +582,35 @@ function ExamEditor({ institutionId, subjects, classes, sections, gradeSubjects,
     setError(null);
     try {
       if (inlineType !== 'multiple_choice') {
+        if (inlineType === 'true_false') {
+          const { data: savedQuestion, error: saveError } = await supabase.rpc('save_single_answer_question', {
+            p_question_id: null,
+            p_institution_id: institutionId,
+            p_subject_id: subjectId,
+            p_type: 'true_false',
+            p_prompt: inlinePrompt.trim(),
+            p_difficulty: 'medium',
+            p_points: Number(inlinePoints) || 1,
+            p_unit: null,
+            p_lesson: null,
+            p_explanation: null,
+            p_metadata: {},
+            p_options: [
+              { label: 'True', is_correct: inlineCorrect === 0, sort_order: 0 },
+              { label: 'False', is_correct: inlineCorrect === 1, sort_order: 1 },
+            ],
+          });
+          if (saveError) throw saveError;
+          const createdQuestionId = (savedQuestion as { question_id?: string } | null)?.question_id;
+          if (!createdQuestionId) throw new Error('Failed to save question.');
+          const added = await handleAddQuestion(createdQuestionId, Number(inlinePoints) || 1);
+          if (!added) await supabase.from('questions').delete().eq('id', createdQuestionId);
+          if (added) {
+            setInlinePrompt('');
+            setInlineCorrect(0);
+          }
+          return;
+        }
         const metadata = inlineType === 'short_answer'
           ? { correct_answer: inlineTextAnswer.trim().toLowerCase() }
           : inlineType === 'numeric' ? { correct_answer: inlineNumericAnswer.trim() } : {};
@@ -503,13 +626,7 @@ function ExamEditor({ institutionId, subjects, classes, sections, gradeSubjects,
           metadata,
         }).select('id').single();
         if (questionError) throw questionError;
-        if (inlineType === 'true_false') {
-          const { error: optionsError } = await supabase.from('question_options').insert([
-            { question_id: question.id, label: 'صح', is_correct: inlineCorrect === 0, sort_order: 0 },
-            { question_id: question.id, label: 'خطأ', is_correct: inlineCorrect === 1, sort_order: 1 },
-          ]);
-          if (optionsError) throw optionsError;
-        }
+        if (!question) throw new Error('Failed to save question.');
         const added = await handleAddQuestion(question.id, Number(inlinePoints) || 1);
         if (!added) await supabase.from('questions').delete().eq('id', question.id);
         if (added) {
@@ -534,9 +651,9 @@ function ExamEditor({ institutionId, subjects, classes, sections, gradeSubjects,
         p_options: inlineOptions.map((label, index) => ({ label: label.trim(), is_correct: index === inlineCorrect })),
       });
       if (saveError) throw saveError;
-      const savedQuestion = (data as { question?: { id?: string } } | null)?.question;
-      if (!savedQuestion?.id) throw new Error('تعذر معرفة السؤال المحفوظ.');
-      const added = await handleAddQuestion(savedQuestion.id, Number(inlinePoints) || 1);
+      const savedQuestionId = extractSavedQuestionId(data);
+      if (!savedQuestionId) throw new Error('تعذر معرفة السؤال المحفوظ.');
+      const added = await handleAddQuestion(savedQuestionId, Number(inlinePoints) || 1);
       if (added) {
         setInlinePrompt('');
         setInlineOptions(['', '', '', '']);
@@ -592,21 +709,28 @@ function ExamEditor({ institutionId, subjects, classes, sections, gradeSubjects,
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-ink-950/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div className="card w-full max-w-3xl max-h-[90vh] overflow-y-auto" onClick={(event) => event.stopPropagation()}>
-        <div className="sticky top-0 bg-white border-b border-ink-100 px-6 py-4 flex items-center justify-between">
-          <h3 className="font-display text-lg font-700 text-ink-900">{editing ? ar.examBuilder.editExam : ar.examBuilder.newExam}</h3>
-          <button type="button" onClick={onClose} className="text-ink-400 hover:text-ink-700 text-xl"><X size={20} /></button>
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <button type="button" onClick={onClose} className="btn-outline shrink-0"><ArrowRight size={16} /> العودة إلى الاختبارات</button>
+          <div className="hidden h-9 w-px bg-ink-200 sm:block" />
+          <div className="min-w-0">
+            <h3 className="truncate font-display text-xl font-700 text-ink-900">{editing ? ar.examBuilder.editExam : ar.examBuilder.newExam}</h3>
+            <p className="mt-1 text-sm text-ink-500">أنشئ تفاصيل الاختبار ثم أضف الأسئلة وراجعه قبل النشر.</p>
+          </div>
         </div>
+        <Badge tone={editing ? 'warning' : 'accent'}>{editing ? 'تعديل اختبار' : 'اختبار جديد'}</Badge>
+      </div>
 
-        <div className="px-6 pt-4">
-          <div className="flex gap-1 p-1 rounded-xl bg-ink-100">
+      <div className="card overflow-hidden">
+        <div className="border-b border-ink-100 p-4 sm:px-6 sm:pt-5">
+          <div className="grid grid-cols-2 gap-1.5 rounded-2xl bg-ink-100/80 p-1.5">
             <button type="button" onClick={() => setTab('details')} className={`flex-1 py-2 rounded-lg text-sm font-600 ${tab === 'details' ? 'bg-white shadow-sm' : 'text-ink-500'}`}>{ar.examBuilder.details}</button>
             <button type="button" onClick={() => setTab('questions')} disabled={!examId} className={`flex-1 py-2 rounded-lg text-sm font-600 disabled:opacity-40 ${tab === 'questions' ? 'bg-white shadow-sm' : 'text-ink-500'}`}>{ar.examBuilder.questions}</button>
           </div>
         </div>
 
-        <div className="p-6 space-y-4">
+        <div className="space-y-4 p-5 sm:p-6">
           {error && <div className="flex items-center gap-2 p-3 rounded-xl bg-danger-50 border border-danger-200"><AlertCircle size={18} className="text-danger-600" /><p className="text-sm text-danger-700">{error}</p></div>}
 
           {tab === 'details' && (
@@ -650,8 +774,15 @@ function ExamEditor({ institutionId, subjects, classes, sections, gradeSubjects,
                   <input type="number" className="input" value={totalPoints} onChange={(event) => setTotalPoints(Number(event.target.value))} />
                 </div>
                 <div>
-                  <label className="label">{ar.examBuilder.passingScore}</label>
+                  <label className="label">{ar.examBuilder.passingScore} (%)</label>
                   <input type="number" className="input" value={passingScore} onChange={(event) => setPassingScore(Number(event.target.value))} />
+                </div>
+              </div>
+              <div className={`rounded-xl border p-3 text-sm ${pointsRemaining === 0 ? 'border-accent-200 bg-accent-50 text-accent-700' : pointsRemaining > 0 ? 'border-warning-200 bg-warning-50 text-warning-800' : 'border-danger-200 bg-danger-50 text-danger-700'}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span>إجمالي الامتحان: <strong className="nums-latin">{Number(totalPoints).toFixed(2)}</strong></span>
+                  <span>مجموع نقاط الأسئلة: <strong className="nums-latin">{questionPointsTotal.toFixed(2)}</strong></span>
+                  <span>{pointsRemaining === 0 ? 'التوزيع مكتمل' : pointsRemaining > 0 ? `متبقي توزيع ${pointsRemaining.toFixed(2)} درجة` : `تجاوز التوزيع ${Math.abs(pointsRemaining).toFixed(2)} درجة`}</span>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-4">
@@ -700,10 +831,29 @@ function ExamEditor({ institutionId, subjects, classes, sections, gradeSubjects,
           {tab === 'questions' && (
             <>
               {classId && (
-                <div className="flex items-center gap-2 p-3 rounded-xl bg-brand-50 border border-brand-100">
-                  <Check size={16} className="text-brand-600" />
-                  <span className="text-sm text-brand-700">{ar.examBuilder.classAssignmentNotice}</span>
-                  <button type="button" data-testid="exam-assign-class" onClick={handleAssignClass} className="btn-ghost !py-1 !px-2 text-xs mr-auto">{ar.examBuilder.assignToClass}</button>
+                <div className="rounded-2xl border border-brand-200 bg-gradient-to-l from-brand-50 to-white p-4 shadow-sm sm:p-5">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-100 text-brand-700">
+                        <Check size={19} />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="chip bg-brand-100 text-brand-700">تخصيص الصف</span>
+                          <p className="text-base font-700 text-ink-900">الامتحان جاهز للتخصيص</p>
+                        </div>
+                        <p className="mt-1 text-sm leading-6 text-ink-600">{ar.examBuilder.classAssignmentNotice}</p>
+                        <div className="mt-2 flex flex-wrap gap-2 text-xs text-ink-500">
+                          <span className="rounded-lg bg-white/80 px-2.5 py-1 ring-1 ring-brand-100">الصف: <strong className="text-ink-800">{classes.find((item) => item.id === classId)?.name ?? 'غير محدد'}</strong></span>
+                          {sectionId && <span className="rounded-lg bg-white/80 px-2.5 py-1 ring-1 ring-brand-100">الفصل: <strong className="text-ink-800">{sections.find((item) => item.id === sectionId)?.name ?? 'غير محدد'}</strong></span>}
+                        </div>
+                      </div>
+                    </div>
+                    <button type="button" data-testid="exam-assign-class" onClick={handleAssignClass} className="btn-primary min-h-11 w-full shrink-0 justify-center !px-5 sm:w-auto">
+                      <Check size={16} />
+                      {ar.examBuilder.assignToClass}
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -810,6 +960,7 @@ function QuickExamModal({
   const [answersText, setAnswersText] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef<string | null>(null);
 
   const choices = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].slice(0, choicesCount);
   const visibleSections = classId ? sections.filter((section) => section.class_id === classId) : [];
@@ -843,89 +994,36 @@ function QuickExamModal({
     setError(null);
 
     if (!title.trim()) { setError(ar.examBuilder.examTitleRequired); return; }
+    if (!subjectId) { setError('اختر المادة قبل إنشاء الاختبار.'); return; }
     if (questionsCount < 1 || questionsCount > 200) { setError(ar.examBuilder.questionsRangeError); return; }
     if (choicesCount < 2 || choicesCount > 8) { setError(ar.examBuilder.choicesRangeError); return; }
     if (answerKey.some((answer) => !choices.includes(answer))) { setError(ar.examBuilder.answerKeyError); return; }
 
     setSaving(true);
     try {
-      const totalPoints = questionsCount;
-      const { data: exam, error: examError } = await supabase.from('examify_exams').insert({
-        institution_id: institutionId,
-        subject_id: subjectId || null,
-        class_id: classId || null,
-        title: title.trim(),
-        description: ar.examBuilder.quickCreatedDescription,
-        instructions: null,
-        total_points: totalPoints,
-        passing_score: Math.ceil(totalPoints * 0.5),
-        duration_minutes: Math.max(30, questionsCount),
-        max_attempts: 1,
-        shuffle_questions: false,
-        shuffle_options: false,
-        show_result_immediately: false,
-        show_correct_answers: false,
-        status: 'draft',
-      }).select('id').single();
-      if (examError) throw examError;
-
-      const examId = (exam as { id: string }).id;
-      const questionRows = answerKey.map((answer, index) => ({
-        institution_id: institutionId,
-        subject_id: subjectId || null,
-        type: 'multiple_choice',
-        prompt: `${ar.examBuilder.quickQuestionPrompt} ${index + 1}`,
-        difficulty: 'medium',
-        points: 1,
-        metadata: { quick_exam: true, answer },
-      }));
-
-      const { data: insertedQuestions, error: questionsError } = await supabase
-        .from('questions')
-        .insert(questionRows)
-        .select('id');
-      if (questionsError) throw questionsError;
-
-      const questionIds = ((insertedQuestions as { id: string }[]) ?? []).map((question) => question.id);
-      if (questionIds.length !== questionsCount) throw new Error(ar.examBuilder.quickQuestionsCreateFailed);
-
-      const optionRows = questionIds.flatMap((questionId, questionIndex) => (
-        choices.map((label, sortOrder) => ({
-          question_id: questionId,
-          label,
-          is_correct: label === answerKey[questionIndex],
-          sort_order: sortOrder,
-        }))
-      ));
-      const examQuestionRows = questionIds.map((questionId, index) => ({
-        exam_id: examId,
-        question_id: questionId,
-        points: 1,
-        sort_order: index,
-      }));
-
-      const [optionsResult, examQuestionsResult, sheetResult] = await Promise.all([
-        supabase.from('question_options').insert(optionRows),
-        supabase.from('exam_questions').insert(examQuestionRows),
-        supabase.from('bubble_sheets').insert({
+      const requestId = requestIdRef.current ?? crypto.randomUUID();
+      requestIdRef.current = requestId;
+      const { data, error: createError } = await supabase.rpc('create_quick_exam_atomic', {
+        p_request: {
+          request_id: requestId,
           institution_id: institutionId,
-          exam_id: examId,
-          model_label: 'A',
-          questions_count: questionsCount,
+          subject_id: subjectId,
+          class_id: classId || null,
+          section_id: sectionId || null,
+          title: title.trim(),
+          question_count: questionsCount,
           choices_count: choicesCount,
-          include_student_id: true,
-          include_student_name: true,
-          include_qr: true,
-        }),
-      ]);
-      if (optionsResult.error) throw optionsResult.error;
-      if (examQuestionsResult.error) throw examQuestionsResult.error;
-      if (sheetResult.error) throw sheetResult.error;
-
-      if (classId) {
-        await supabase.from('exam_assignments').insert({ exam_id: examId, class_id: classId, section_id: sectionId || null });
+          answers: answerKey,
+          prompt_prefix: ar.examBuilder.quickQuestionPrompt,
+        },
+      });
+      if (createError) throw createError;
+      const result = data as { exam_id?: string; questions_count?: number } | null;
+      if (!result?.exam_id || result.questions_count !== questionsCount) {
+        throw new Error(ar.examBuilder.quickQuestionsCreateFailed);
       }
 
+      requestIdRef.current = null;
       onSaved();
     } catch (error) {
       console.error('Quick exam create failed', error);
@@ -936,13 +1034,22 @@ function QuickExamModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-ink-950/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div className="card w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={(event) => event.stopPropagation()}>
-        <div className="sticky top-0 bg-white border-b border-ink-100 px-6 py-4 flex items-center justify-between">
-          <h3 className="font-display text-lg font-700 text-ink-900">{ar.examBuilder.quickExam}</h3>
-          <button onClick={onClose} className="text-ink-400 hover:text-ink-700 text-xl"><X size={20} /></button>
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <button type="button" onClick={onClose} className="btn-outline shrink-0"><ArrowRight size={16} /> العودة إلى الاختبارات</button>
+          <div className="hidden h-9 w-px bg-ink-200 sm:block" />
+          <div className="min-w-0">
+            <h3 className="truncate font-display text-xl font-700 text-ink-900">{ar.examBuilder.quickExam}</h3>
+            <p className="mt-1 text-sm text-ink-500">أنشئ اختبارًا ورقيًا ومفتاح إجابته ونموذج Bubble Sheet في خطوات بسيطة.</p>
+          </div>
         </div>
-        <div className="p-6 space-y-4">
+        <Badge tone="brand">إعداد سريع</Badge>
+      </div>
+
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_18rem]">
+        <div className="card overflow-hidden">
+          <div className="space-y-4 p-5 sm:p-6">
           {error && <div className="flex items-center gap-2 p-3 rounded-xl bg-danger-50 border border-danger-200"><AlertCircle size={18} className="text-danger-600" /><p className="text-sm text-danger-700">{error}</p></div>}
           <div>
             <label className="label">{ar.examBuilder.examTitle}</label>
@@ -997,11 +1104,28 @@ function QuickExamModal({
           <div className="card-soft p-3 text-sm text-ink-600">
             {questionsCount || 0} - {ar.examBuilder.quickSummary}
           </div>
-          <button onClick={handleCreate} disabled={saving} className="btn-primary w-full disabled:opacity-60">
+          <button onClick={handleCreate} disabled={saving} className="btn-primary h-12 w-full disabled:opacity-60">
             {saving ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
             {ar.examBuilder.createQuickExam}
           </button>
+          </div>
         </div>
+
+        <aside className="card hidden h-fit space-y-5 p-5 xl:sticky xl:top-5 xl:block">
+          <div className="flex items-start gap-3">
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-ink-900 text-white"><Zap size={19} /></div>
+            <div>
+              <h4 className="font-700 text-ink-900">إنشاء سريع</h4>
+              <p className="mt-1 text-xs leading-5 text-ink-500">هذا المسار مناسب للاختبارات الورقية التي تعتمد على مفتاح إجابة جاهز.</p>
+            </div>
+          </div>
+          <div className="space-y-3 border-t border-ink-100 pt-4 text-sm">
+            <div className="flex items-center gap-2 text-ink-700"><span className="grid h-6 w-6 place-items-center rounded-full bg-brand-600 text-xs font-700 text-white">1</span> حدد المادة وعدد الأسئلة</div>
+            <div className="flex items-center gap-2 text-ink-700"><span className="grid h-6 w-6 place-items-center rounded-full bg-brand-100 text-xs font-700 text-brand-700">2</span> أدخل مفتاح الإجابة</div>
+            <div className="flex items-center gap-2 text-ink-700"><span className="grid h-6 w-6 place-items-center rounded-full bg-brand-100 text-xs font-700 text-brand-700">3</span> أنشئ الاختبار والنموذج</div>
+          </div>
+          <div className="rounded-xl bg-ink-50 p-3 text-xs leading-5 text-ink-500">سيتم إنشاء الاختبار كمسودة، ويمكنك مراجعته قبل نشره.</div>
+        </aside>
       </div>
     </div>
   );

@@ -3,6 +3,7 @@ import { Plus, Trash2, Edit3, Loader2, AlertCircle, BookOpen, CheckCircle2, Cloc
 import { Card, SectionHeader, Badge, EmptyState, ProgressBar } from '../components/ui';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
 import type { UserRole } from '../lib/auth';
+import { useFeedback } from '../components/FeedbackProvider';
 
 interface LessonRow {
   id: string;
@@ -20,6 +21,7 @@ interface ProgressRow { lesson_id: string; status: string; progress_percent: num
 
 export function LMS() {
   const { institutionId, role, user } = useAuthSafe();
+  const { confirm } = useFeedback();
   const canEdit = ['super_admin', 'school_admin', 'teacher'].includes(role as UserRole);
   const isStudent = role === 'student';
   const [subjects, setSubjects] = useState<SubjectRow[]>([]);
@@ -164,7 +166,7 @@ export function LMS() {
                     {canEdit && (
                       <>
                         <button onClick={() => { setEditing(lesson); setShowEditor(true); }} className="grid place-items-center w-8 h-8 rounded-lg text-ink-400 hover:bg-ink-100 hover:text-ink-700"><Edit3 size={16} /></button>
-                        <button onClick={async () => { if (confirm('حذف هذا الدرس؟')) { await supabase.from('lessons').delete().eq('id', lesson.id); loadLessons(); } }} className="grid place-items-center w-8 h-8 rounded-lg text-ink-400 hover:bg-danger-50 hover:text-danger-600"><Trash2 size={16} /></button>
+                        <button onClick={async () => { if (await confirm('حذف هذا الدرس؟', { title: 'حذف الدرس', confirmLabel: 'حذف الدرس' })) { await supabase.from('lessons').delete().eq('id', lesson.id); loadLessons(); } }} className="grid place-items-center w-8 h-8 rounded-lg text-ink-400 hover:bg-danger-50 hover:text-danger-600"><Trash2 size={16} /></button>
                       </>
                     )}
                   </div>

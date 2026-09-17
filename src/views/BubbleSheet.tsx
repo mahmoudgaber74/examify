@@ -1,12 +1,16 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { FileText, Loader2, AlertCircle, Download, Upload, ScanLine, Eye, Check, X, Trash2, Plus, ChevronUp, ChevronDown } from 'lucide-react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { FileText, Loader2, AlertCircle, Download, Upload, ScanLine, Eye, Check, X, Trash2, Plus, ChevronUp, ChevronDown, Info } from 'lucide-react';
 import { Card, SectionHeader, Badge, EmptyState } from '../components/ui';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
-import { generateBubbleSheetPDF, downloadBlob, type BubbleSheetSection } from '../lib/bubble-sheet';
+import { BUBBLE_SHEET_MODEL_LABELS, buildBubbleSheetLayout, finalizedSnapshotToLayout, generateBubbleSheetPDF, downloadBlob, getBubbleSheetVisualOrder, type BubbleSheetSection, type BubbleSheetSourceQuestion, type FinalizedBubbleSheetLayoutPayload } from '../lib/bubble-sheet';
 import { scanBubbleSheet, type OmrScanResult } from '../lib/omr-scanner';
+import { useFeedback } from '../components/FeedbackProvider';
 
 interface ExamRow { id: string; title: string; status: string; }
 interface ExamSectionRow { id: string; title: string; sort_order: number; }
+interface ExamQuestionStructureRow { id: string; question_id: string; section_id: string; sort_order: number; }
+interface ExamQuestionOptionRow { question_id: string; id: string; label: string; sort_order: number; }
+interface OMRSourceRow { exam_question_id: string; question_id: string; section_id: string | null; question_type: string; points: number; sort_order: number; question_ordinal: number; option_count: number; option_id: string; option_label: string; option_sort_order: number; option_ordinal: number; }
 interface StudentRow { id: string; full_name: string; student_code: string | null; }
 interface BubbleSheetRow {
   id: string;
@@ -21,6 +25,9 @@ interface BubbleSheetRow {
   created_at: string;
   qr_token: string;
   status: string;
+  snapshot_state?: string;
+  generator_version?: string;
+  is_finalized?: boolean;
   sections?: BubbleSheetSection[];
 }
 interface OmrResultRow {
@@ -51,7 +58,14 @@ interface OmrResultRow {
   processing_time_ms: number | null;
   annotated_storage_path: string | null;
   warnings: string[] | null;
+  needs_review: boolean;
+  review_reason: string | null;
+  resolved_by: string | null;
   created_at: string;
+}
+
+function displayedOmrConfidence(result: Pick<OmrResultRow, 'document_confidence' | 'confidence'>): number {
+  return Number(result.document_confidence ?? result.confidence ?? 0);
 }
 
 type Tab = 'generate' | 'scan' | 'results';
@@ -59,6 +73,7 @@ const OMR_BUCKET = 'exam-sheets';
 const OMR_ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'];
 const OMR_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const OMR_TEMPLATE_VERSION = 1;
+const OMR_RESULT_COLUMNS = 'id, exam_id, student_profile_id, exam_attempt_id, student_name, student_code, image_url, original_storage_path, processed_storage_path, image_mime_type, image_size_bytes, file_sha256, template_version, status, score, total_questions, correct_count, wrong_count, empty_count, confidence, processing_error, engine, engine_version, document_confidence, processing_time_ms, annotated_storage_path, warnings, needs_review, review_reason, resolved_by, created_at';
 
 function omrFileExtension(file: File) {
   if (file.type === 'image/png') return 'png';
@@ -119,6 +134,10 @@ function friendlyOmrError(error: unknown) {
   return message || 'حدث خطأ أثناء معالجة صورة المسح.';
 }
 
+async function loadExamQuestionOptions(examId: string) {
+  return supabase.rpc('get_omr_eligible_exam_questions', { p_exam_id: examId });
+}
+
 export function BubbleSheet() {
   const { institutionId, user } = useAuthSafe();
   const [tab, setTab] = useState<Tab>('generate');
@@ -143,7 +162,7 @@ export function BubbleSheet() {
     if (!institutionId) return;
     const { data } = await supabase
       .from('bubble_sheets')
-      .select('id, exam_id, model_label, questions_count, choices_count, include_student_id, include_student_name, include_qr, template_version, qr_token, status, sections, created_at')
+      .select('id, exam_id, model_label, questions_count, choices_count, include_student_id, include_student_name, include_qr, template_version, qr_token, status, snapshot_state, generator_version, is_finalized, sections, created_at')
       .eq('institution_id', institutionId)
       .order('created_at', { ascending: false });
     setSheets((data as BubbleSheetRow[]) ?? []);
@@ -164,7 +183,7 @@ export function BubbleSheet() {
     if (!institutionId) return;
     const { data } = await supabase
       .from('omr_results')
-      .select('id, exam_id, student_profile_id, exam_attempt_id, student_name, student_code, image_url, original_storage_path, processed_storage_path, image_mime_type, image_size_bytes, file_sha256, template_version, status, score, total_questions, correct_count, wrong_count, empty_count, confidence, processing_error, engine, engine_version, document_confidence, processing_time_ms, annotated_storage_path, warnings, created_at')
+      .select(OMR_RESULT_COLUMNS)
       .eq('institution_id', institutionId)
       .order('created_at', { ascending: false });
     setOmrResults((data as OmrResultRow[]) ?? []);
@@ -199,62 +218,137 @@ export function BubbleSheet() {
         </button>
       </div>
 
-      {tab === 'generate' && <GenerateTab exams={exams} institutionId={institutionId ?? ''} onCreated={loadSheets} />}
+      {tab === 'generate' && <GenerateTab exams={exams} onCreated={loadSheets} />}
       {tab === 'scan' && <ScanTab exams={exams} sheets={sheets} institutionId={institutionId ?? ''} userId={user?.id ?? ''} onScanned={loadOmrResults} />}
       {tab === 'results' && <ResultsTab results={omrResults} exams={exams} students={students} onUpdated={loadOmrResults} />}
     </div>
   );
 }
 
-function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; institutionId: string; onCreated: () => void }) {
+function GenerateTab({ exams, onCreated }: { exams: ExamRow[]; onCreated: () => void }) {
   const [examId, setExamId] = useState('');
   const [modelLabel, setModelLabel] = useState('A');
-  const [questionsCount, setQuestionsCount] = useState(20);
-  const [choicesCount, setChoicesCount] = useState(4);
+  const [questionsCount, setQuestionsCount] = useState(0);
+  const [choicesCount, setChoicesCount] = useState(0);
+  const [sourceQuestions, setSourceQuestions] = useState<BubbleSheetSourceQuestion[]>([]);
   const [sectionsEnabled, setSectionsEnabled] = useState(false);
   const [sections, setSections] = useState<BubbleSheetSection[]>([
     { title: 'لفظي', questionsCount: 13 },
     { title: 'المفردات الشاذة', questionsCount: 16 },
     { title: 'كمي', questionsCount: 10 },
   ]);
-  const [loadingExamSections, setLoadingExamSections] = useState(false);
   const [includeStudentId, setIncludeStudentId] = useState(true);
   const [includeStudentName, setIncludeStudentName] = useState(true);
   const [includeQr, setIncludeQr] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [structureLoading, setStructureLoading] = useState(false);
+  const [structureError, setStructureError] = useState<string | null>(null);
+  const generationRequestIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!examId) return;
+    generationRequestIdRef.current = null;
+    if (!examId) {
+      setQuestionsCount(0);
+      setChoicesCount(0);
+      setSourceQuestions([]);
+      setSections([{ title: 'الأسئلة', questionsCount: 0 }]);
+      setStructureError(null);
+      return;
+    }
     let cancelled = false;
     async function loadExamStructure() {
-      setLoadingExamSections(true);
-      const [{ data: sectionRows }, { count }] = await Promise.all([
+      setStructureLoading(true);
+      setStructureError(null);
+      const [{ data: sectionRows, error: sectionError }, { data: questionRows, error: questionError }] = await Promise.all([
         supabase.from('exam_sections').select('id, title, sort_order').eq('exam_id', examId).order('sort_order').order('created_at'),
-        supabase.from('exam_questions').select('id', { count: 'exact', head: true }).eq('exam_id', examId),
+        supabase.from('exam_questions').select('id, question_id, section_id, sort_order').eq('exam_id', examId).order('sort_order').order('id'),
       ]);
       if (cancelled) return;
+      if (sectionError) throw sectionError;
+      if (questionError) throw questionError;
+      const orderedQuestions = (questionRows as ExamQuestionStructureRow[]) ?? [];
+      if (orderedQuestions.length === 0) {
+        setQuestionsCount(0);
+        setChoicesCount(0);
+        setSections([{ title: 'الأسئلة', questionsCount: 0 }]);
+        setStructureLoading(false);
+        return;
+      }
+      const { data: optionRows, error: optionsError } = await loadExamQuestionOptions(examId);
+      if (optionsError) throw optionsError;
+      const groupedSourceRows = new Map<string, OMRSourceRow[]>();
+      for (const row of (optionRows as OMRSourceRow[]) ?? []) {
+        groupedSourceRows.set(row.exam_question_id, [...(groupedSourceRows.get(row.exam_question_id) ?? []), row]);
+      }
+      const eligibleQuestions: BubbleSheetSourceQuestion[] = [...groupedSourceRows.values()]
+        .sort((a, b) => (a[0]?.question_ordinal ?? 0) - (b[0]?.question_ordinal ?? 0))
+        .map((rows) => {
+          const first = rows[0];
+          return {
+            examQuestionId: first.exam_question_id,
+            questionId: first.question_id,
+            questionType: first.question_type,
+            points: Number(first.points),
+            sortOrder: first.sort_order,
+            options: rows.sort((a, b) => a.option_ordinal - b.option_ordinal).map((row) => ({ id: row.option_id, label: row.option_label, sortOrder: row.option_sort_order })),
+          };
+        });
+      if (eligibleQuestions.length === 0) throw new Error('NO_OMR_ELIGIBLE_QUESTIONS');
+      setSourceQuestions(eligibleQuestions);
+      setQuestionsCount(eligibleQuestions.length);
+      setChoicesCount(Math.max(...eligibleQuestions.map((question) => question.options.length)));
+      const sectionRowsForEligibility = (sectionRows as ExamSectionRow[]) ?? [];
+      const sectionByExamQuestion = new Map(orderedQuestions.map((row) => [row.id, row.section_id]));
+      const eligibleSectionCounts = new Map<string, number>();
+      for (const question of eligibleQuestions) {
+        const sectionId = sectionByExamQuestion.get(question.examQuestionId);
+        if (sectionId) eligibleSectionCounts.set(sectionId, (eligibleSectionCounts.get(sectionId) ?? 0) + 1);
+      }
+      if (sectionRowsForEligibility.length) {
+        const populatedRows = sectionRowsForEligibility.filter((row) => (eligibleSectionCounts.get(row.id) ?? 0) > 0);
+        setSections((populatedRows.length ? populatedRows : sectionRowsForEligibility).map((row) => ({ title: row.title, questionsCount: eligibleSectionCounts.get(row.id) ?? 0 })));
+      } else {
+        setSections([{ title: 'Questions', questionsCount: eligibleQuestions.length }]);
+      }
+      setStructureLoading(false);
+      return;
+      const optionCounts = new Map<string, number>();
+      for (const row of (optionRows as ExamQuestionOptionRow[]) ?? []) {
+        optionCounts.set(row.question_id, (optionCounts.get(row.question_id) ?? 0) + 1);
+      }
+      const distinctOptionCounts = new Set(orderedQuestions.map((question) => optionCounts.get(question.question_id) ?? 0));
+      if (distinctOptionCounts.size !== 1 || ![2, 3, 4, 5, 6, 7, 8].includes([...distinctOptionCounts][0] ?? 0)) {
+        setQuestionsCount(orderedQuestions.length);
+        setChoicesCount(0);
+        setStructureError('لا يمكن إنشاء نموذج OMR دقيق لأن عدد اختيارات الأسئلة غير موحد أو غير صالح.');
+      } else {
+        setQuestionsCount(orderedQuestions.length);
+        setChoicesCount([...distinctOptionCounts][0]);
+      }
       const rows = (sectionRows as ExamSectionRow[]) ?? [];
       if (rows.length) {
-        const { data: questionRows } = await supabase.from('exam_questions').select('section_id').eq('exam_id', examId);
         const counts = new Map<string, number>();
-        for (const row of (questionRows as { section_id: string | null }[]) ?? []) {
+        for (const row of orderedQuestions) {
           if (row.section_id) counts.set(row.section_id, (counts.get(row.section_id) ?? 0) + 1);
         }
         const populatedRows = rows.filter((row) => (counts.get(row.id) ?? 0) > 0);
-        setSections((populatedRows.length ? populatedRows : rows).map((row) => ({ title: row.title, questionsCount: counts.get(row.id) ?? 1 })));
+        setSections((populatedRows.length ? populatedRows : rows).map((row) => ({ title: row.title, questionsCount: counts.get(row.id) ?? 0 })));
       } else {
-        setSections([{ title: 'الأسئلة', questionsCount: count ?? 20 }]);
+        setSections([{ title: 'الأسئلة', questionsCount: orderedQuestions.length }]);
       }
-      setLoadingExamSections(false);
+      setStructureLoading(false);
     }
-    loadExamStructure().catch(() => { if (!cancelled) setLoadingExamSections(false); });
+    loadExamStructure().catch((loadError) => {
+      if (!cancelled) {
+        setQuestionsCount(0);
+        setChoicesCount(0);
+        setStructureError(loadError instanceof Error ? loadError.message : 'تعذر تحميل بنية الامتحان.');
+        setStructureLoading(false);
+      }
+    });
     return () => { cancelled = true; };
   }, [examId]);
-
-  function updateSection(index: number, patch: Partial<BubbleSheetSection>) {
-    setSections((items) => items.map((item, i) => i === index ? { ...item, ...patch } : item));
-  }
 
   function moveSection(index: number, direction: -1 | 1) {
     setSections((items) => {
@@ -270,16 +364,54 @@ function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; in
     setGenerating(true);
     setError(null);
     if (!examId) { setError('اختر امتحان'); setGenerating(false); return; }
+    if (structureLoading) { setError('انتظر حتى تكتمل قراءة أسئلة الامتحان.'); setGenerating(false); return; }
+    if (structureError) { setError(structureError); setGenerating(false); return; }
+    if (questionsCount < 1) { setError('لا يمكن إنشاء نموذج OMR لامتحان بلا أسئلة.'); setGenerating(false); return; }
+    if (choicesCount < 2) { setError('لا يمكن إنشاء نموذج OMR قبل التحقق من اختيارات الأسئلة.'); setGenerating(false); return; }
     const exam = exams.find((e) => e.id === examId);
     if (!exam) { setError('الامتحان غير موجود'); setGenerating(false); return; }
     const activeSections = sectionsEnabled ? sections.filter((section) => section.title.trim() && section.questionsCount > 0) : [];
     if (sectionsEnabled && (activeSections.length < 2 || activeSections.length > 4)) { setError('النموذج المركّب يدعم من قسمين إلى 4 أقسام.'); setGenerating(false); return; }
     if (sectionsEnabled && activeSections.some((section) => !Number.isInteger(section.questionsCount) || section.questionsCount < 1)) { setError('عدد أسئلة كل قسم يجب أن يكون رقمًا صحيحًا.'); setGenerating(false); return; }
     const totalQuestions = activeSections.reduce((sum, section) => sum + section.questionsCount, 0) || questionsCount;
+    if (totalQuestions !== questionsCount) { setError('إجمالي أسئلة الأقسام يجب أن يساوي عدد أسئلة الامتحان الفعلي.'); setGenerating(false); return; }
+
+    const generationRequestId = generationRequestIdRef.current ?? crypto.randomUUID();
+    generationRequestIdRef.current = generationRequestId;
+
+    if (sourceQuestions.length) {
+      try {
+        const qrToken = crypto.randomUUID();
+        const exam = exams.find((item) => item.id === examId);
+        if (!exam) throw new Error('Exam not found');
+        const layoutConfig = { examId, examTitle: exam.title, modelLabel, questionsCount: sourceQuestions.length, choicesCount, templateVersion: OMR_TEMPLATE_VERSION, includeStudentId, includeStudentName, includeQr, qrToken, pageSize: 'A4' as const, sections: activeSections.length > 0 ? activeSections : undefined, questions: sourceQuestions };
+        const layout = buildBubbleSheetLayout(layoutConfig);
+        const snapshot = {
+          exam_id: examId, model_label: modelLabel, questions_count: sourceQuestions.length, choices_count: choicesCount, include_student_id: includeStudentId, include_student_name: includeStudentName, include_qr: includeQr, template_version: OMR_TEMPLATE_VERSION, qr_token: qrToken, page_size: 'A4', page_orientation: 'portrait', generator_version: 'phase-a-v2',
+          sections: layout.sections.map((section) => ({ section_key: section.sectionKey, title: section.title, visual_index: section.visualIndex, question_start_index: section.questionStartIndex, question_count: section.questionCount, page_number: section.pageNumber, normalized_x: section.rect.x, normalized_y: section.rect.y, normalized_width: section.rect.width, normalized_height: section.rect.height })),
+          questions: layout.questions.map((geometry, index) => { const source = sourceQuestions[index]; if (!source) throw new Error('OMR snapshot question mapping is incomplete'); return { exam_question_id: source.examQuestionId, question_id: source.questionId, question_type: source.questionType, points_snapshot: source.points, omr_eligible: true, question_ordinal: index + 1, section_visual_index: geometry.sectionVisualIndex, global_question_number: geometry.globalQuestionNumber, section_question_number: geometry.sectionQuestionNumber, page_number: geometry.pageNumber, sort_snapshot: source.sortOrder, normalized_x: geometry.rect.x, normalized_y: geometry.rect.y, normalized_width: geometry.rect.width, normalized_height: geometry.rect.height, options: source.options.map((option, optionIndex) => { const optionGeometry = geometry.options[optionIndex]; if (!optionGeometry) throw new Error('OMR snapshot option geometry is incomplete'); return { option_id: option.id, option_label: option.label, canonical_option_ordinal: optionIndex + 1, visual_index: optionGeometry.visualIndex, normalized_x: optionGeometry.rect.x, normalized_y: optionGeometry.rect.y, normalized_width: optionGeometry.rect.width, normalized_height: optionGeometry.rect.height }; }) }; }),
+        };
+        const { data: snapshotData, error: snapshotError } = await supabase.rpc('create_variable_bubble_sheet_snapshot_idempotent', { p_snapshot: { ...snapshot, generation_request_id: generationRequestId } });
+        if (snapshotError) throw snapshotError;
+        const snapshotId = (snapshotData as { id?: string } | null)?.id;
+        if (!snapshotId) throw new Error('OMR finalized snapshot identity is missing');
+        const { data: finalizedLayoutData, error: finalizedLayoutError } = await supabase.rpc('get_v2_finalized_bubble_sheet_layout', { p_bubble_sheet_id: snapshotId });
+        if (finalizedLayoutError) throw finalizedLayoutError;
+        const finalizedLayout = finalizedSnapshotToLayout(finalizedLayoutData as FinalizedBubbleSheetLayoutPayload);
+        const blob = await generateBubbleSheetPDF({ ...layoutConfig, layout: finalizedLayout });
+        downloadBlob(blob, `bubble-sheet-${exam.title}-${modelLabel}.pdf`);
+        onCreated();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'OMR snapshot generation failed');
+      } finally {
+        setGenerating(false);
+      }
+      return;
+    }
 
     try {
       const qrToken = crypto.randomUUID();
-      const blob = await generateBubbleSheetPDF({
+      const layoutConfig = {
         examId,
         examTitle: exam.title,
         modelLabel,
@@ -290,10 +422,10 @@ function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; in
         includeStudentName,
         includeQr,
         qrToken,
-        pageSize: 'A4',
+        pageSize: 'A4' as const,
         sections: activeSections.length > 0 ? activeSections : undefined,
-      });
-      downloadBlob(blob, `bubble-sheet-${exam.title}-${modelLabel}.pdf`);
+      };
+      const layout = buildBubbleSheetLayout(layoutConfig);
 
       if (sectionsEnabled) {
         const { data: existingSections, error: sectionsError } = await supabase.from('exam_sections').select('id').eq('exam_id', examId).order('sort_order').order('created_at');
@@ -326,8 +458,29 @@ function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; in
         }
       }
 
-      const { error: sheetError } = await supabase.from('bubble_sheets').insert({
-        institution_id: institutionId,
+      const { data: questionRows, error: questionError } = await supabase.from('exam_questions')
+        .select('id, question_id, sort_order, points')
+        .eq('exam_id', examId)
+        .order('sort_order')
+        .order('id');
+      if (questionError) throw questionError;
+      const orderedQuestions = (questionRows as { id: string; question_id: string; sort_order: number; points: number }[]) ?? [];
+      if (orderedQuestions.length !== totalQuestions || layout.questions.length !== orderedQuestions.length) throw new Error('OMR snapshot question mapping is incomplete');
+
+      const { data: optionRows, error: optionsError } = await loadExamQuestionOptions(examId);
+      if (optionsError) throw optionsError;
+      const optionRowsByQuestion = new Map<string, ExamQuestionOptionRow[]>();
+      for (const row of (optionRows as ExamQuestionOptionRow[]) ?? []) {
+        const rows = optionRowsByQuestion.get(row.question_id) ?? [];
+        rows.push(row);
+        optionRowsByQuestion.set(row.question_id, rows);
+      }
+      for (const question of orderedQuestions) {
+        const rows = optionRowsByQuestion.get(question.question_id) ?? [];
+        if (rows.length > choicesCount) throw new Error('OMR snapshot has more options than the generated layout supports');
+      }
+
+      const snapshot = {
         exam_id: examId,
         model_label: modelLabel,
         questions_count: totalQuestions,
@@ -337,11 +490,57 @@ function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; in
         include_qr: includeQr,
         template_version: OMR_TEMPLATE_VERSION,
         qr_token: qrToken,
-        sections: activeSections,
-        status: 'active',
-        generated_by: (await supabase.auth.getUser()).data.user?.id ?? null,
-      });
-      if (sheetError) throw sheetError;
+        page_size: 'A4',
+        page_orientation: 'portrait',
+        generator_version: 'phase-a-v1',
+        sections: layout.sections.map((section) => ({
+          section_key: section.sectionKey,
+          title: section.title,
+          visual_index: section.visualIndex,
+          question_start_index: section.questionStartIndex,
+          question_count: section.questionCount,
+          page_number: section.pageNumber,
+          normalized_x: section.rect.x,
+          normalized_y: section.rect.y,
+          normalized_width: section.rect.width,
+          normalized_height: section.rect.height,
+        })),
+        questions: layout.questions.map((geometry, index) => {
+          const question = orderedQuestions[index];
+          const options = optionRowsByQuestion.get(question.question_id) ?? [];
+          return {
+            exam_question_id: question.id,
+            question_id: question.question_id,
+            section_visual_index: geometry.sectionVisualIndex,
+            global_question_number: geometry.globalQuestionNumber,
+            section_question_number: geometry.sectionQuestionNumber,
+            page_number: geometry.pageNumber,
+            sort_snapshot: question.sort_order,
+            normalized_x: geometry.rect.x,
+            normalized_y: geometry.rect.y,
+            normalized_width: geometry.rect.width,
+            normalized_height: geometry.rect.height,
+            options: options.map((option, optionIndex) => {
+              const optionGeometry = geometry.options[optionIndex];
+              if (!optionGeometry) throw new Error('OMR snapshot option geometry is incomplete');
+              return {
+                option_id: option.id,
+                option_label: option.label,
+                visual_index: optionGeometry.visualIndex,
+                normalized_x: optionGeometry.rect.x,
+                normalized_y: optionGeometry.rect.y,
+                normalized_width: optionGeometry.rect.width,
+                normalized_height: optionGeometry.rect.height,
+              };
+            }),
+          };
+        }),
+      };
+      const { error: snapshotError } = await supabase.rpc('create_exact_bubble_sheet_snapshot_idempotent', { p_snapshot: { ...snapshot, generation_request_id: generationRequestId } });
+      if (snapshotError) throw snapshotError;
+
+      const blob = await generateBubbleSheetPDF({ ...layoutConfig, layout });
+      downloadBlob(blob, `bubble-sheet-${exam.title}-${modelLabel}.pdf`);
 
       onCreated();
     } catch (e) {
@@ -352,70 +551,107 @@ function GenerateTab({ exams, institutionId, onCreated }: { exams: ExamRow[]; in
   }
 
   return (
-    <Card className="p-6 space-y-4">
-      <h3 className="font-700 text-ink-900">إنشاء نموذج بابل شيت</h3>
-      {error && <div className="flex items-center gap-2 p-3 rounded-xl bg-danger-50 border border-danger-200"><AlertCircle size={18} className="text-danger-600" /><p className="text-sm text-danger-700">{error}</p></div>}
-      <div>
-        <label className="label">الامتحان</label>
-        <select data-testid="omr-exam-select" className="input" value={examId} onChange={(e) => setExamId(e.target.value)}>
-          <option value="">اختر امتحان</option>
-          {exams.map((e) => <option key={e.id} value={e.id}>{e.title}</option>)}
-        </select>
+    <Card className="space-y-5 p-5 sm:p-6">
+      <div className="flex flex-col gap-3 border-b border-ink-100 pb-5 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3">
+          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-brand-50 text-brand-600"><FileText size={20} /></div>
+          <div>
+            <h3 className="font-700 text-ink-900">إنشاء نموذج بابل شيت</h3>
+            <p className="mt-1 text-xs text-ink-500">اختر الامتحان ثم راجع إعدادات الورقة قبل توليد ملف PDF.</p>
+          </div>
+        </div>
+        <Badge tone={examId ? 'accent' : 'neutral'}>{examId ? 'جاهز للإعداد' : 'اختر امتحانًا'}</Badge>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      {error && <div className="flex items-start gap-2 rounded-xl border border-danger-200 bg-danger-50 p-3"><AlertCircle size={18} className="mt-0.5 shrink-0 text-danger-600" /><p className="text-sm text-danger-700">{error}</p></div>}
+
+      <section className="space-y-4">
         <div>
-          <label className="label">النموذج</label>
-          <select className="input" value={modelLabel} onChange={(e) => setModelLabel(e.target.value)}>
-            {['A', 'B', 'C', 'D'].map((m) => <option key={m} value={m}>نموذج {m}</option>)}
-          </select>
+          <h4 className="font-700 text-ink-900">بيانات الامتحان</h4>
+          <p className="mt-1 text-xs text-ink-500">سيتم بناء النموذج من الأسئلة المرتبطة بالامتحان المختار.</p>
         </div>
         <div>
-          <label className="label">عدد الأسئلة</label>
-          <input data-testid="omr-question-count" type="number" min="1" max="100" className="input" value={questionsCount} onChange={(e) => setQuestionsCount(Number(e.target.value))} />
+          <label className="label">الامتحان</label>
+          <div className="relative">
+            <select data-testid="omr-exam-select" className="input h-12 appearance-none !py-0 pl-11" value={examId} onChange={(e) => setExamId(e.target.value)}>
+              <option value="">اختر امتحان</option>
+              {exams.map((e) => <option key={e.id} value={e.id}>{e.title}</option>)}
+            </select>
+            <ChevronDown size={17} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-ink-400" aria-hidden />
+          </div>
         </div>
-      </div>
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="label">عدد الاختيارات</label>
-          <input type="number" min="2" max="8" className="input" value={choicesCount} onChange={(e) => setChoicesCount(Number(e.target.value))} />
+        <div className="grid gap-4 sm:grid-cols-3">
+          <div>
+            <label className="label">نسخة النموذج</label>
+            <div className="relative">
+              <select aria-describedby="bubble-sheet-model-help" className="input h-12 appearance-none !py-0 pl-11" value={modelLabel} onChange={(e) => setModelLabel(e.target.value)}>
+                {BUBBLE_SHEET_MODEL_LABELS.map((m) => <option key={m} value={m}>نموذج {m}</option>)}
+              </select>
+              <ChevronDown size={17} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-ink-400" aria-hidden />
+            </div>
+            <p id="bubble-sheet-model-help" className="mt-2 flex items-start gap-1.5 text-[11px] leading-5 text-ink-500"><Info size={14} className="mt-0.5 shrink-0 text-brand-500" />كل نسخة ترتّب اختيارات كل سؤال بشكل مختلف، ومفتاح التصحيح يظل مرتبطًا بالاختيار الأصلي.</p>
+          </div>
+          <div>
+            <label className="label">عدد الأسئلة</label>
+            <input data-testid="omr-question-count" type="number" min="1" max="100" className="input h-12 !py-0" value={questionsCount} readOnly aria-readonly="true" />
+          </div>
+          <div>
+            <label className="label">عدد الاختيارات</label>
+            <input type="number" min="2" max="8" className="input h-12 !py-0" value={choicesCount} readOnly aria-readonly="true" />
+          </div>
         </div>
-      </div>
-      <div className="rounded-xl border border-brand-100 bg-brand-50/60 p-4">
-        <label className="flex items-center gap-2 cursor-pointer text-sm font-700 text-brand-800">
-          <input type="checkbox" checked={sectionsEnabled} onChange={(e) => setSectionsEnabled(e.target.checked)} />
-          إنشاء ورقة مركّبة بأقسام متعددة
-        </label>
-        <p className="text-xs text-brand-700 mt-1.5">الأقسام مرتبطة بالامتحان ويتم ترقيم أسئلتها تلقائيًا حسب ترتيب الأقسام. يمكنك إنشاء من قسمين إلى 4 أقسام.</p>
-        {sectionsEnabled && <div className="mt-3 space-y-2">
-          {sections.map((section, index) => <div key={index} className="grid grid-cols-[1fr_100px_auto] gap-2 items-center">
-            <input className="input" value={section.title} onChange={(e) => setSections((items) => items.map((item, i) => i === index ? { ...item, title: e.target.value } : item))} placeholder={`اسم القسم ${index + 1}`} aria-label={`اسم القسم ${index + 1}`} />
-            <input className="input nums-latin" type="number" min="1" max="60" value={section.questionsCount} onChange={(e) => setSections((items) => items.map((item, i) => i === index ? { ...item, questionsCount: Number(e.target.value) } : item))} aria-label={`عدد أسئلة القسم ${index + 1}`} />
+      </section>
+
+      <section className="rounded-2xl border border-brand-100 bg-brand-50/60 p-4 sm:p-5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h4 className="font-700 text-brand-900">تقسيم ورقة الإجابة</h4>
+            <p className="mt-1 text-xs leading-5 text-brand-700">قسّم الورقة إلى أقسام مع ترقيم تلقائي حسب ترتيبها. يدعم النموذج من قسمين إلى 4 أقسام.</p>
+          </div>
+          <label className="flex shrink-0 cursor-pointer items-center gap-2 text-sm font-700 text-brand-800"><input type="checkbox" checked={sectionsEnabled} onChange={(e) => setSectionsEnabled(e.target.checked)} /> تفعيل الأقسام</label>
+        </div>
+        {sectionsEnabled && <div className="mt-4 space-y-2 border-t border-brand-100 pt-4">
+          {sections.map((section, index) => <div key={index} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_7rem_auto] sm:items-center">
+            <input className="input h-12" value={section.title} onChange={(e) => setSections((items) => items.map((item, i) => i === index ? { ...item, title: e.target.value } : item))} placeholder={`اسم القسم ${index + 1}`} aria-label={`اسم القسم ${index + 1}`} />
+            <input className="input h-12 nums-latin" type="number" min="1" max="60" value={section.questionsCount} readOnly aria-readonly="true" aria-label={`عدد أسئلة القسم ${index + 1}`} />
             <div className="flex items-center gap-1">
-              <button type="button" title="تقديم" onClick={() => moveSection(index, -1)} disabled={index === 0} className="p-1 rounded border border-ink-200 disabled:opacity-30"><ChevronUp size={14} /></button>
-              <button type="button" title="تأخير" onClick={() => moveSection(index, 1)} disabled={index === sections.length - 1} className="p-1 rounded border border-ink-200 disabled:opacity-30"><ChevronDown size={14} /></button>
-              <button type="button" title="حذف" onClick={() => setSections((items) => items.filter((_, i) => i !== index))} disabled={sections.length <= 1} className="p-1 rounded border border-danger-200 text-danger-600 disabled:opacity-30"><Trash2 size={14} /></button>
+              <button type="button" title="تقديم" onClick={() => moveSection(index, -1)} disabled={index === 0} className="grid h-10 w-10 place-items-center rounded-xl border border-ink-200 bg-white disabled:opacity-30"><ChevronUp size={14} /></button>
+              <button type="button" title="تأخير" onClick={() => moveSection(index, 1)} disabled={index === sections.length - 1} className="grid h-10 w-10 place-items-center rounded-xl border border-ink-200 bg-white disabled:opacity-30"><ChevronDown size={14} /></button>
+              <button type="button" title="حذف" onClick={() => setSections((items) => items.filter((_, i) => i !== index))} disabled={sections.length <= 1} className="grid h-10 w-10 place-items-center rounded-xl border border-danger-200 bg-white text-danger-600 disabled:opacity-30"><Trash2 size={14} /></button>
             </div>
           </div>)}
-          <button type="button" onClick={() => sections.length < 4 && setSections((items) => [...items, { title: `القسم ${items.length + 1}`, questionsCount: 10 }])} disabled={sections.length >= 4} className="btn-outline !py-1.5 text-xs"><Plus size={14} /> إضافة قسم</button>
-          <p className="text-xs text-ink-500">إجمالي الأسئلة: <strong className="nums-latin">{sections.reduce((sum, section) => sum + section.questionsCount, 0)}</strong></p>
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+            <button type="button" onClick={() => sections.length < 4 && setSections((items) => [...items, { title: `القسم ${items.length + 1}`, questionsCount: 10 }])} disabled={sections.length >= 4} className="btn-outline !py-2 text-xs"><Plus size={14} /> إضافة قسم</button>
+            <p className="text-xs text-ink-500">إجمالي الأسئلة: <strong className="nums-latin">{sections.reduce((sum, section) => sum + section.questionsCount, 0)}</strong></p>
+          </div>
         </div>}
+      </section>
+
+      <section className="space-y-3">
+        <div>
+          <h4 className="font-700 text-ink-900">بيانات تظهر على الورقة</h4>
+          <p className="mt-1 text-xs text-ink-500">اختر البيانات التي يحتاجها المصحح أو نظام التصحيح الآلي.</p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <label className="flex min-h-12 cursor-pointer items-center gap-2 rounded-xl border border-ink-200 bg-white px-3 text-sm hover:bg-ink-50"><input type="checkbox" checked={includeStudentId} onChange={(e) => setIncludeStudentId(e.target.checked)} /> رقم الطالب</label>
+          <label className="flex min-h-12 cursor-pointer items-center gap-2 rounded-xl border border-ink-200 bg-white px-3 text-sm hover:bg-ink-50"><input type="checkbox" checked={includeStudentName} onChange={(e) => setIncludeStudentName(e.target.checked)} /> اسم الطالب</label>
+          <label className="flex min-h-12 cursor-pointer items-center gap-2 rounded-xl border border-ink-200 bg-white px-3 text-sm hover:bg-ink-50"><input type="checkbox" checked={includeQr} onChange={(e) => setIncludeQr(e.target.checked)} /> QR Code</label>
+        </div>
+      </section>
+
+      <div className="border-t border-ink-100 pt-5">
+        <button data-testid="omr-generate-template" onClick={handleGenerate} disabled={generating || structureLoading} className="btn-primary h-12 w-full disabled:cursor-not-allowed disabled:opacity-50">
+          {generating ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
+          توليد وتحميل PDF
+        </button>
       </div>
-      <div className="grid grid-cols-3 gap-3">
-        <label className="flex items-center gap-2 cursor-pointer text-sm"><input type="checkbox" checked={includeStudentId} onChange={(e) => setIncludeStudentId(e.target.checked)} /> رقم الطالب</label>
-        <label className="flex items-center gap-2 cursor-pointer text-sm"><input type="checkbox" checked={includeStudentName} onChange={(e) => setIncludeStudentName(e.target.checked)} /> اسم الطالب</label>
-        <label className="flex items-center gap-2 cursor-pointer text-sm"><input type="checkbox" checked={includeQr} onChange={(e) => setIncludeQr(e.target.checked)} /> QR Code</label>
-      </div>
-      <button data-testid="omr-generate-template" onClick={handleGenerate} disabled={generating} className="btn-primary w-full">
-        {generating ? <Loader2 size={18} className="animate-spin" /> : <Download size={18} />}
-        توليد وتحميز PDF
-      </button>
     </Card>
   );
 }
 
 function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: ExamRow[]; sheets: BubbleSheetRow[]; institutionId: string; userId: string; onScanned: () => void }) {
-  const [engine, setEngine] = useState<'basic' | 'opencv'>('basic');
+  const [engine, setEngine] = useState<'basic' | 'opencv'>('opencv');
   const [examId, setExamId] = useState('');
+  const [modelLabel, setModelLabel] = useState('A');
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -423,7 +659,10 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
   const [correctAnswers, setCorrectAnswers] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
 
-  const selectedSheet = useMemo(() => sheets.find((s) => s.exam_id === examId) ?? null, [examId, sheets]);
+  const selectedSheet = useMemo(() => {
+    const candidates = sheets.filter((s) => s.exam_id === examId && s.is_finalized === true && s.snapshot_state === 'exact' && s.generator_version === 'phase-a-v2');
+    return candidates.find((sheet) => sheet.model_label === modelLabel) ?? null;
+  }, [examId, modelLabel, sheets]);
 
   useEffect(() => {
     if (!file) {
@@ -435,6 +674,66 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
     setPreviewUrl(nextUrl);
     return () => URL.revokeObjectURL(nextUrl);
   }, [file]);
+
+  useEffect(() => {
+    const resultId = scanResult?.omrResultId;
+    if (scanResult?.engine !== 'opencv' || !scanResult.jobId || !resultId || scanResult.answers.length > 0 || ['completed', 'processed', 'needs_review', 'approved', 'failed'].includes(scanResult.processingStatus ?? '')) return;
+    let cancelled = false;
+
+    const pollProcessingResult = async () => {
+      const { data: persisted, error: resultError } = await supabase
+        .from('omr_results')
+        .select(OMR_RESULT_COLUMNS)
+        .eq('id', resultId)
+        .maybeSingle();
+      if (cancelled || resultError || !persisted) return;
+
+      const row = persisted as OmrResultRow;
+      const terminal = ['completed', 'processed', 'needs_review', 'approved', 'failed'].includes(row.status);
+      if (!terminal) {
+        setScanResult((current) => current ? { ...current, processingStatus: row.status, documentConfidence: displayedOmrConfidence(row) } : current);
+        return;
+      }
+
+      if (row.status === 'failed') {
+        setError(friendlyOmrError(row.processing_error ?? 'فشلت معالجة ورقة OMR.'));
+        setScanResult((current) => current ? { ...current, processingStatus: row.status, documentConfidence: displayedOmrConfidence(row), warnings: row.warnings ?? [] } : current);
+        return;
+      }
+
+      const { data: persistedAnswers } = await supabase
+        .from('omr_answers')
+        .select('question_number, detected_answer, correct_answer, is_correct, needs_manual_review, confidence, review_reason, manual_override')
+        .eq('omr_result_id', resultId)
+        .order('question_number');
+      if (cancelled) return;
+
+      const answers: OmrScanResult['answers'] = ((persistedAnswers as { question_number: number; detected_answer: string | null; correct_answer: string | null; is_correct: boolean | null; needs_manual_review: boolean; confidence: number; review_reason: 'empty' | 'ambiguous' | 'multiple_marks' | 'low_confidence' | null; manual_override: string | null }[]) ?? []).map((answer) => ({
+        questionNumber: answer.question_number,
+        detectedAnswer: answer.manual_override ?? answer.detected_answer,
+        confidence: Number(answer.confidence ?? 0),
+        needsManualReview: answer.needs_manual_review,
+        reviewReason: answer.review_reason,
+        fillRatios: {},
+      }));
+      setScanResult((current) => current ? {
+        ...current,
+        answers,
+        overallConfidence: displayedOmrConfidence(row),
+        documentConfidence: displayedOmrConfidence(row),
+        processingStatus: row.status,
+        studentName: row.student_name,
+        studentCode: row.student_code,
+        warnings: row.warnings ?? [],
+        annotatedStoragePath: row.annotated_storage_path,
+      } : current);
+      onScanned();
+    };
+
+    void pollProcessingResult();
+    const timer = window.setInterval(() => { void pollProcessingResult(); }, 3000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [onScanned, scanResult?.answers.length, scanResult?.engine, scanResult?.jobId, scanResult?.omrResultId, scanResult?.processingStatus]);
 
   async function handleFileChange(nextFile: File | null) {
     setScanResult(null);
@@ -458,6 +757,7 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
     setScanning(true);
     setError(null);
     if (!file || !examId) { setError('اختر امتحان وارفع صورة'); setScanning(false); return; }
+    if (engine === 'opencv' && !selectedSheet?.id) { setError('لا يمكن تشغيل المعالجة الآلية قبل اختيار قالب OMR v2 نهائي لهذا الامتحان.'); setScanning(false); return; }
 
     const exam = exams.find((e) => e.id === examId);
     if (!exam) { setError('الامتحان غير موجود'); setScanning(false); return; }
@@ -536,6 +836,7 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
       const eqData = (examQuestions as unknown as { question_id: string; sort_order: number; points: number; questions: { id: string; type: string } }[]) ?? [];
       const answerKey: Record<number, string> = {};
       const optionIds: Record<number, Record<string, string>> = {};
+      const visualAnswerLabels: Record<number, Record<string, string>> = {};
 
       for (let i = 0; i < eqData.length; i++) {
         const { data: opts, error: optionsError } = await supabase
@@ -548,6 +849,8 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
         optionIds[i + 1] = Object.fromEntries(optionRows.map((o) => [o.label, o.id]));
         const correctOpt = optionRows.find((o) => o.is_correct);
         if (correctOpt) answerKey[i + 1] = correctOpt.label;
+        const visualOrder = getBubbleSheetVisualOrder(selectedSheet?.model_label ?? 'A', eqData[i].question_id, optionRows.length);
+        visualAnswerLabels[i + 1] = Object.fromEntries(visualOrder.map((canonicalIndex, visualIndex) => [String.fromCharCode(65 + visualIndex), optionRows[canonicalIndex]?.label]).filter((entry): entry is [string, string] => Boolean(entry[1])));
       }
       setCorrectAnswers(answerKey);
 
@@ -570,34 +873,9 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
         if (opencvError) throw opencvError;
         const response = opencvData as { job_id?: string; job_status?: string; request_id?: string; annotated_storage_path?: string | null; processing_status?: string; engine_version?: string; warnings?: string[]; questions?: { question_number: number; detected_option: string | null; confidence: number; status: string; fill_scores: Record<string, number>; warnings?: string[] }[]; document_confidence?: number };
         if (!response.job_id) throw new Error('OpenCV OMR job was not queued');
-        if (!response.questions) {
-          result = { answers: [], overallConfidence: 0, studentName: null, studentCode: null, engine: 'opencv', engineVersion: '0.1.0', jobId: response.job_id, processingStatus: response.job_status ?? 'queued', warnings: [], annotatedStoragePath: null };
-          setScanResult(result);
-          setScanning(false);
-          onScanned();
-          return;
-        }
-        result = {
-          answers: response.questions.map((question) => ({
-            questionNumber: question.question_number,
-            detectedAnswer: question.detected_option,
-            confidence: question.confidence,
-            needsManualReview: ['blank', 'multiple_marks', 'low_confidence', 'unreadable', 'needs_review'].includes(question.status),
-            reviewReason: question.status === 'multiple_marks' ? 'multiple_marks' : question.status === 'blank' ? 'empty' : question.status === 'low_confidence' ? 'low_confidence' : null,
-            fillRatios: question.fill_scores,
-          })),
-          overallConfidence: response.document_confidence ?? 0,
-          studentName: null,
-          studentCode: null,
-          engine: 'opencv',
-          engineVersion: response.engine_version ?? '0.1.0',
-          jobId: response.job_id ?? null,
-          documentConfidence: response.document_confidence ?? 0,
-          warnings: response.warnings ?? [],
-          annotatedStoragePath: response.annotated_storage_path ?? null,
-          processingStatus: response.processing_status,
-        };
-        // The Edge Function persists the job, result, and answers atomically.
+        // OpenCV is asynchronous; its enqueue response is not final result data.
+        // The persisted omr_results row is reloaded after processing for all summary/detail fields.
+        result = { answers: [], overallConfidence: 0, studentName: null, studentCode: null, engine: 'opencv', engineVersion: response.engine_version ?? '0.1.0', jobId: response.job_id, omrResultId: insertedOmrId, processingStatus: response.job_status ?? 'queued', warnings: [], annotatedStoragePath: null };
         setScanResult(result);
         onScanned();
         return;
@@ -608,6 +886,15 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
           columns: selectedSheet?.sections?.length ? Math.min(selectedSheet.sections.length, 4) : Math.max(1, Math.ceil(questionsCount / 25)),
           sections: selectedSheet?.sections,
         });
+        result = {
+          ...result,
+          answers: result.answers.map((answer) => {
+            if (!answer.detectedAnswer) return answer;
+            const canonicalLabel = visualAnswerLabels[answer.questionNumber]?.[answer.detectedAnswer] ?? answer.detectedAnswer;
+            const fillRatios = Object.fromEntries(Object.entries(answer.fillRatios).map(([visualLabel, fill]) => [visualAnswerLabels[answer.questionNumber]?.[visualLabel] ?? visualLabel, fill]));
+            return { ...answer, detectedAnswer: canonicalLabel, fillRatios };
+          }),
+        };
       }
 
       setScanResult(result);
@@ -620,6 +907,8 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
 
       const { error: resultError } = await supabase.from('omr_results').update({
         status: reviewCount > 0 || result.overallConfidence < 0.75 ? 'needs_review' : 'processed',
+        needs_review: reviewCount > 0 || result.overallConfidence < 0.75,
+        review_reason: result.answers.find((a) => a.reviewReason)?.reviewReason ?? (result.overallConfidence < 0.75 ? 'low_confidence' : null),
         score: correctCount,
         total_questions: result.answers.length,
         correct_count: correctCount,
@@ -683,6 +972,16 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
           </select>
         </div>
         <div>
+          <label className="label">نسخة النموذج</label>
+          <div className="relative">
+            <select data-testid="omr-model-select" className="input h-12 appearance-none !py-0 pl-11" value={modelLabel} onChange={(event) => setModelLabel(event.target.value)}>
+              {BUBBLE_SHEET_MODEL_LABELS.map((model) => <option key={model} value={model}>نموذج {model}</option>)}
+            </select>
+            <ChevronDown size={17} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-ink-400" aria-hidden />
+          </div>
+          <p className="mt-2 text-xs text-ink-500">اختَر نفس النسخة المكتوبة أعلى ورقة الإجابة لضمان التصحيح الصحيح.</p>
+        </div>
+        <div>
           <label className="label">صورة الورقة</label>
           <div className="border-2 border-dashed border-ink-200 rounded-xl p-8 text-center hover:border-brand-400 transition cursor-pointer" onClick={() => document.getElementById('omr-upload')?.click()}>
             {examId && selectedSheet && (
@@ -715,7 +1014,17 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
         </button>
       </Card>
 
-      {scanResult && (
+      {scanResult && scanResult.engine === 'opencv' && scanResult.answers.length === 0 && !['completed', 'processed', 'needs_review', 'approved', 'failed'].includes(scanResult.processingStatus ?? '') ? (
+        <Card data-testid="opencv-scan-processing" className="p-6">
+          <div className="flex items-center gap-3 text-brand-700">
+            <Loader2 size={20} className="animate-spin" />
+            <div>
+              <h4 className="font-700 text-ink-900">تم رفع الورقة وبدأت المعالجة</h4>
+              <p className="mt-1 text-sm text-ink-500">ستظهر النتيجة النهائية بعد اكتمال المعالجة. افتح تبويب النتائج لمتابعة الحالة.</p>
+            </div>
+          </div>
+        </Card>
+      ) : scanResult && (
         <Card data-testid="opencv-scan-result" className="p-6">
           <h4 className="font-700 text-ink-900 mb-3">نتيجة المسح</h4>
           {scanResult.engine === 'opencv' && <div data-testid="opencv-result-metadata" className="mb-4 rounded-xl bg-brand-50 border border-brand-100 p-3 text-sm text-brand-800">OpenCV {scanResult.engineVersion ?? 'unknown'} · Job {scanResult.jobId ?? '—'} · حالة المعالجة محفوظة</div>}
@@ -757,7 +1066,9 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
 }
 
 function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResultRow[]; exams: ExamRow[]; students: StudentRow[]; onUpdated: () => void }) {
+  const { confirm, toast } = useFeedback();
   const [selected, setSelected] = useState<OmrResultRow | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState<'all' | 'needs_review' | 'approved' | 'processing'>('all');
   const [answers, setAnswers] = useState<{ question_number: number; question_id: string | null; detected_answer: string | null; correct_answer: string | null; is_correct: boolean | null; needs_manual_review: boolean; manual_override: string | null; confidence: number; id: string; review_reason: string | null }[]>([]);
   const [scanImageUrl, setScanImageUrl] = useState<string | null>(null);
@@ -766,11 +1077,11 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
   const [selectedStudentId, setSelectedStudentId] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
-  const reviewCount = results.filter((result) => ['needs_review', 'processed', 'pending'].includes(result.status)).length;
+  const reviewCount = results.filter((result) => result.needs_review || result.status === 'needs_review').length;
   const processingCount = results.filter((result) => ['uploaded', 'processing'].includes(result.status)).length;
   const approvedCount = results.filter((result) => result.status === 'approved').length;
   const visibleResults = useMemo(() => results.filter((result) => {
-    if (statusFilter === 'needs_review') return ['needs_review', 'processed', 'pending'].includes(result.status);
+    if (statusFilter === 'needs_review') return result.needs_review || result.status === 'needs_review';
     if (statusFilter === 'approved') return result.status === 'approved';
     if (statusFilter === 'processing') return ['uploaded', 'processing'].includes(result.status);
     return true;
@@ -795,23 +1106,38 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
   }
 
   async function viewResult(r: OmrResultRow) {
-    setSelected(r);
-    setSelectedStudentId(r.student_profile_id ?? '');
+    setSelected(null);
+    setAnswers([]);
+    setDetailLoading(true);
     setActionError(null);
-    await loadScanImage(r.annotated_storage_path ?? r.processed_storage_path ?? r.original_storage_path);
-    const { data } = await supabase
-      .from('omr_answers')
-      .select('id, question_number, question_id, detected_answer, correct_answer, is_correct, needs_manual_review, manual_override, confidence, review_reason')
-      .eq('omr_result_id', r.id)
-      .order('question_number');
-    setAnswers((data as typeof answers) ?? []);
+    try {
+      const [{ data: latestResult, error: resultError }, { data: latestAnswers, error: answersError }] = await Promise.all([
+        supabase.from('omr_results').select(OMR_RESULT_COLUMNS).eq('id', r.id).maybeSingle(),
+        supabase.from('omr_answers').select('id, question_number, question_id, detected_answer, correct_answer, is_correct, needs_manual_review, manual_override, confidence, review_reason').eq('omr_result_id', r.id).order('question_number'),
+      ]);
+      if (resultError) throw resultError;
+      if (answersError) throw answersError;
+      if (!latestResult) throw new Error('OMR result was not found');
+
+      const persistedResult = latestResult as OmrResultRow;
+      const persistedAnswers = (latestAnswers as typeof answers) ?? [];
+      await loadScanImage(persistedResult.annotated_storage_path ?? persistedResult.processed_storage_path ?? persistedResult.original_storage_path);
+      setSelected(persistedResult);
+      setSelectedStudentId(persistedResult.student_profile_id ?? '');
+      setAnswers(persistedAnswers);
+      void onUpdated();
+    } catch (error) {
+      setActionError(friendlyOmrError(error));
+    } finally {
+      setDetailLoading(false);
+    }
   }
 
   async function deleteResult(r: OmrResultRow) {
-    if (!confirm('هل تريد حذف نتيجة المسح؟')) return;
+    if (!(await confirm('هل تريد حذف نتيجة المسح؟', { title: 'حذف نتيجة المسح', confirmLabel: 'حذف النتيجة' }))) return;
     const { error: dbError } = await supabase.from('omr_results').delete().eq('id', r.id);
     if (dbError) {
-      alert(friendlyOmrError(dbError));
+      toast(friendlyOmrError(dbError), 'error');
       return;
     }
     setSelected(null);
@@ -823,21 +1149,21 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
     const a = answers.find((x) => x.id === answerId);
     if (!a) return;
     const manualOverride = value === 'empty' ? null : value;
-    const isCorrect = manualOverride && a.correct_answer ? manualOverride === a.correct_answer : false;
-    let optionId: string | null = null;
-    if (manualOverride) {
-      const { data: option } = await supabase
-        .from('question_options')
-        .select('id')
-        .eq('label', manualOverride)
-        .eq('question_id', a.question_id ?? '')
-        .maybeSingle();
-      optionId = (option as { id: string } | null)?.id ?? null;
+    if (!manualOverride) return;
+    setActionLoading(true);
+    setActionError(null);
+    const { data, error } = await supabase.rpc('resolve_omr_answer', { p_omr_answer_id: answerId, p_manual_answer: manualOverride });
+    setActionLoading(false);
+    if (error) {
+      setActionError(friendlyOmrError(error));
+      return;
     }
-    const nextAnswers = answers.map((x) => x.id === answerId ? { ...x, manual_override: manualOverride, is_correct: isCorrect, needs_manual_review: false } : x);
-    await supabase.from('omr_answers').update({ option_id: optionId, manual_override: manualOverride, is_correct: isCorrect, needs_manual_review: false, manually_reviewed_at: new Date().toISOString() }).eq('id', answerId);
+    const resolved = Array.isArray(data) ? data[0] as { needs_review: boolean; score: number; correct_count: number; wrong_count: number; empty_count: number; review_reason: string | null } | undefined : undefined;
+    const isCorrect = a.correct_answer ? manualOverride === a.correct_answer : false;
+    const nextAnswers = answers.map((x) => x.id === answerId ? { ...x, manual_override: manualOverride, is_correct: isCorrect, needs_manual_review: false, review_reason: null } : x);
     setAnswers(nextAnswers);
-    if (selected) await recomputeResultStats(selected.id, nextAnswers);
+    if (selected && resolved) setSelected({ ...selected, needs_review: resolved.needs_review, review_reason: resolved.review_reason, score: resolved.score, correct_count: resolved.correct_count, wrong_count: resolved.wrong_count, empty_count: resolved.empty_count, status: resolved.needs_review ? 'needs_review' : 'processed', resolved_by: resolved.needs_review ? null : selected.resolved_by });
+    onUpdated();
   }
 
   async function saveDraft() {
@@ -847,6 +1173,7 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
     const { error } = await supabase.from('omr_results').update({
       student_profile_id: selectedStudentId || null,
       status: answers.some((a) => a.needs_manual_review) ? 'needs_review' : 'processed',
+      needs_review: answers.some((a) => a.needs_manual_review),
       reviewed_at: new Date().toISOString(),
     }).eq('id', selected.id);
     setActionLoading(false);
@@ -854,7 +1181,7 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
       setActionError(friendlyOmrError(error));
       return;
     }
-    setSelected({ ...selected, student_profile_id: selectedStudentId || null, status: answers.some((a) => a.needs_manual_review) ? 'needs_review' : 'processed' });
+    setSelected({ ...selected, student_profile_id: selectedStudentId || null, needs_review: answers.some((a) => a.needs_manual_review), status: answers.some((a) => a.needs_manual_review) ? 'needs_review' : 'processed' });
     onUpdated();
   }
 
@@ -869,7 +1196,7 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
     }
     setActionLoading(true);
     setActionError(null);
-    const { data, error } = await supabase.rpc('approve_omr_result', {
+    const { data, error } = await supabase.rpc('approve_omr_result_idempotent', {
       p_omr_result_id: r.id,
       p_student_profile_id: selectedStudentId,
     });
@@ -883,32 +1210,8 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
     setSelected({ ...r, status: 'approved', student_profile_id: selectedStudentId, exam_attempt_id: approved?.exam_attempt_id ?? r.exam_attempt_id });
   }
 
-  async function recomputeResultStats(resultId: string, currentAnswers: typeof answers) {
-    const correctCount = currentAnswers.filter((a) => a.is_correct === true).length;
-    const wrongCount = currentAnswers.filter((a) => (a.manual_override ?? a.detected_answer) && a.is_correct === false).length;
-    const emptyCount = currentAnswers.filter((a) => !(a.manual_override ?? a.detected_answer)).length;
-    const reviewCount = currentAnswers.filter((a) => a.needs_manual_review).length;
-    const confidence = currentAnswers.length > 0
-      ? currentAnswers.reduce((sum, a) => sum + Number(a.confidence ?? 0), 0) / currentAnswers.length
-      : 0;
-    await supabase.from('omr_results').update({
-      score: correctCount,
-      correct_count: correctCount,
-      wrong_count: wrongCount,
-      empty_count: emptyCount,
-      confidence,
-      status: reviewCount > 0 ? 'needs_review' : 'processed',
-    }).eq('id', resultId);
-    setSelected((prev) => prev && prev.id === resultId ? {
-      ...prev,
-      score: correctCount,
-      correct_count: correctCount,
-      wrong_count: wrongCount,
-      empty_count: emptyCount,
-      confidence,
-      status: reviewCount > 0 ? 'needs_review' : 'processed',
-    } : prev);
-    onUpdated();
+  if (detailLoading) {
+    return <Card className="p-6"><div className="flex items-center justify-center py-12"><Loader2 size={24} className="animate-spin text-brand-600" /></div></Card>;
   }
 
   if (selected) {
@@ -923,6 +1226,7 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
           </div>
         </div>
         {actionError && <div className="mb-4 flex items-center gap-2 p-3 rounded-xl bg-danger-50 border border-danger-200"><AlertCircle size={18} className="text-danger-600" /><p className="text-sm text-danger-700">{actionError}</p></div>}
+        {(selected.needs_review || answers.some((a) => a.needs_manual_review)) && <div className="mb-4 flex items-center gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-sm text-warning-800"><AlertCircle size={18} /><p>هذه الورقة تحتاج مراجعة بشرية{selected.review_reason ? `: ${selected.review_reason}` : ''}. اختر A أو B أو C أو D لكل سؤال معلّم.</p></div>}
         <div className="grid md:grid-cols-3 gap-3 mb-4">
           <div>
             <label className="label">الطالب</label>
@@ -951,7 +1255,7 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
           <div className="card-soft p-3 text-center"><div className="text-xl font-800 text-accent-600 nums-latin">{selected.correct_count}</div><div className="text-xs text-ink-500">صحيحة</div></div>
           <div className="card-soft p-3 text-center"><div className="text-xl font-800 text-danger-600 nums-latin">{selected.wrong_count}</div><div className="text-xs text-ink-500">خاطئة</div></div>
           <div className="card-soft p-3 text-center"><div className="text-xl font-800 text-ink-400 nums-latin">{selected.empty_count}</div><div className="text-xs text-ink-500">فارغة</div></div>
-          <div className="card-soft p-3 text-center"><div className="text-xl font-800 text-brand-600 nums-latin">{Math.round(selected.confidence * 100)}%</div><div className="text-xs text-ink-500">الثقة</div></div>
+          <div className="card-soft p-3 text-center"><div className="text-xl font-800 text-brand-600 nums-latin">{Math.round(displayedOmrConfidence(selected) * 100)}%</div><div className="text-xs text-ink-500">الثقة</div></div>
         </div>
         <div className="space-y-1 max-h-96 overflow-y-auto">
           {answers.map((a) => {
@@ -964,7 +1268,7 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
                 {selected.status !== 'approved' && (
                   <select data-testid="omr-answer-override" className="input !py-1 !px-2 !w-auto text-xs mr-auto" defaultValue="" onChange={(e) => { if (e.target.value) overrideAnswer(a.id, e.target.value); }}>
                     <option value="">تعديل...</option>
-                    {['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].map((o) => <option key={o} value={o}>{o}</option>)}
+                    {['A', 'B', 'C', 'D'].map((o) => <option key={o} value={o}>{o}</option>)}
                     <option value="empty">فارغة</option>
                   </select>
                 )}
@@ -984,6 +1288,12 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
 
   return (
     <div className="space-y-4">
+      {reviewCount > 0 && (
+        <div className="flex items-center gap-2 rounded-xl border border-warning-200 bg-warning-50 p-3 text-sm text-warning-800">
+          <AlertCircle size={18} />
+          <span>توجد أوراق أو إجابات OMR غامضة. راجعها يدويًا قبل الاعتماد؛ لن تُحوّل الحالات المعلّقة إلى صفر تلقائيًا.</span>
+        </div>
+      )}
       <div className="grid grid-cols-3 gap-3">
         <button type="button" onClick={() => setStatusFilter('needs_review')} className={`card p-3 text-right transition ${statusFilter === 'needs_review' ? 'ring-2 ring-warning-300' : 'hover:border-warning-300'}`}>
           <p className="text-xs text-ink-500">تحتاج مراجعة</p><p className="mt-1 text-xl font-800 text-warning-600 nums-latin">{reviewCount}</p>
@@ -1010,7 +1320,7 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
                 <div className="flex items-center gap-3 text-xs text-ink-400 mt-1">
                   {r.student_name && <span>{r.student_name}</span>}
                   <span className="nums-latin">{r.correct_count}/{r.total_questions}</span>
-                  <span>· {Math.round(r.confidence * 100)}% ثقة</span>
+                  <span>· {Math.round(displayedOmrConfidence(r) * 100)}% ثقة</span>
                   <span>· {new Date(r.created_at).toLocaleString('ar')}</span>
                 </div>
               </div>

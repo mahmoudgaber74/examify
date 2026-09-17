@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Search, Trash2, Edit3, Loader2, AlertCircle, BookOpen, Filter, CheckCircle2, Copy, Eye, X, ListChecks, FileQuestion, Layers3, Upload, FileUp } from 'lucide-react';
+import { Plus, Search, Trash2, Edit3, Loader2, AlertCircle, BookOpen, Filter, CheckCircle2, Copy, Eye, X, ListChecks, FileQuestion, Layers3, Upload, FileUp, ArrowRight } from 'lucide-react';
 import { Card, SectionHeader, Badge, EmptyState } from '../components/ui';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
 import type { UserRole } from '../lib/auth';
 import { ar, getArabicErrorMessage } from '../lib/translate';
 import { extractQuestionFile, parseImportedQuestions, type ImportedQuestion } from '../lib/question-import';
+import { useFeedback } from '../components/FeedbackProvider';
 
 interface QuestionRow {
   id: string;
@@ -89,6 +90,7 @@ function defaultOrderingItems(): OrderingItemRow[] {
 
 export function QuestionBank() {
   const { institutionId, role } = useAuthSafe();
+  const { confirm } = useFeedback();
   const canEdit = ['super_admin', 'school_admin', 'teacher'].includes(role as UserRole);
   const [questions, setQuestions] = useState<QuestionRow[]>([]);
   const [subjects, setSubjects] = useState<SubjectRow[]>([]);
@@ -156,13 +158,34 @@ export function QuestionBank() {
   }, [questions]);
 
   async function handleDelete(id: string) {
-    if (!confirm(ar.questionBank.deleteConfirm)) return;
+    if (!(await confirm(ar.questionBank.deleteConfirm, { title: 'حذف السؤال', confirmLabel: 'حذف السؤال' }))) return;
     const { error: err } = await supabase.from('questions').delete().eq('id', id);
     if (err) { console.error('Question delete failed', err); setError(getArabicErrorMessage(err)); return; }
     setQuestions((prev) => prev.filter((q) => q.id !== id));
   }
 
   async function handleDuplicate(q: QuestionRow) {
+    if (q.type === 'multiple_choice' || q.type === 'true_false') {
+      const { data: options, error: optionsError } = await supabase.from('question_options').select('label, is_correct, sort_order').eq('question_id', q.id).order('sort_order');
+      if (optionsError) { setError(getArabicErrorMessage(optionsError)); return; }
+      const { error: rpcError } = await supabase.rpc('save_single_answer_question', {
+        p_question_id: null,
+        p_institution_id: institutionId,
+        p_subject_id: q.subject_id,
+        p_type: q.type,
+        p_prompt: `${q.prompt} (نسخة)`,
+        p_difficulty: q.difficulty,
+        p_points: q.points,
+        p_unit: q.unit,
+        p_lesson: q.lesson,
+        p_explanation: q.explanation,
+        p_metadata: q.metadata ?? {},
+        p_options: options ?? [],
+      });
+      if (rpcError) { console.error('Question duplicate failed', rpcError); setError(getArabicErrorMessage(rpcError)); return; }
+      loadQuestions();
+      return;
+    }
     const { data, error: err } = await supabase
       .from('questions')
       .insert({
@@ -234,7 +257,26 @@ export function QuestionBank() {
     let saved = 0;
     try {
       for (const question of importQuestions) {
-        const { data, error: questionError } = await supabase.from('questions').insert({
+        if (question.options.length >= 2) {
+          const { error: rpcError } = await supabase.rpc('save_single_answer_question', {
+            p_question_id: null,
+            p_institution_id: institutionId,
+            p_subject_id: importSubject,
+            p_type: 'multiple_choice',
+            p_prompt: question.prompt,
+            p_difficulty: importDifficulty,
+            p_points: importPoints,
+            p_unit: null,
+            p_lesson: null,
+            p_explanation: null,
+            p_metadata: {},
+            p_options: question.options,
+          });
+          if (rpcError) throw rpcError;
+          saved += 1;
+          continue;
+        }
+        const { error: questionError } = await supabase.from('questions').insert({
           institution_id: institutionId,
           subject_id: importSubject,
           type: question.options.length >= 2 ? 'multiple_choice' : 'short_answer',
@@ -244,10 +286,6 @@ export function QuestionBank() {
           metadata: {},
         }).select('id').single();
         if (questionError) throw questionError;
-        if (question.options.length >= 2 && data) {
-          const { error: optionsError } = await supabase.from('question_options').insert(question.options.map((option) => ({ ...option, question_id: (data as { id: string }).id })));
-          if (optionsError) throw optionsError;
-        }
         saved += 1;
       }
       setShowImport(false);
@@ -267,6 +305,18 @@ export function QuestionBank() {
 
   if (!institutionId) {
     return <div className="card p-8 text-center text-ink-500">{ar.questionBank.loadingInstitution}</div>;
+  }
+
+  if (showEditor) {
+    return (
+      <QuestionEditor
+        institutionId={institutionId}
+        subjects={editorSubjects}
+        editing={editing}
+        onClose={() => setShowEditor(false)}
+        onSaved={handleSaved}
+      />
+    );
   }
 
   return (
@@ -340,16 +390,6 @@ export function QuestionBank() {
             />
           ))}
         </div>
-      )}
-
-      {showEditor && (
-        <QuestionEditor
-          institutionId={institutionId}
-          subjects={editorSubjects}
-          editing={editing}
-          onClose={() => setShowEditor(false)}
-          onSaved={handleSaved}
-        />
       )}
 
       {viewing && <QuestionPreview question={viewing} subject={subjects.find((s) => s.id === viewing.subject_id)} showCorrectAnswer onClose={() => setViewing(null)} />}
@@ -831,6 +871,29 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
         return;
       }
 
+      if (type === 'true_false') {
+        const { error: rpcErr } = await supabase.rpc('save_single_answer_question', {
+          p_question_id: editing?.id ?? null,
+          p_institution_id: institutionId,
+          p_subject_id: subjectId,
+          p_type: 'true_false',
+          p_prompt: prompt.trim(),
+          p_difficulty: difficulty,
+          p_points: Number(points),
+          p_unit: unit,
+          p_lesson: lesson,
+          p_explanation: explanation,
+          p_metadata: editing?.metadata ?? {},
+          p_options: [
+            { label: 'True', is_correct: trueFalseAnswer, sort_order: 0 },
+            { label: 'False', is_correct: !trueFalseAnswer, sort_order: 1 },
+          ],
+        });
+        if (rpcErr) throw rpcErr;
+        onSaved();
+        return;
+      }
+
       let questionId = editing?.id;
 
       if (editing) {
@@ -844,15 +907,6 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
 
       if (!questionId) throw new Error('Failed to save question.');
 
-      if (type === 'true_false') {
-        await supabase.from('question_options').delete().eq('question_id', questionId);
-        const { error: optErr } = await supabase.from('question_options').insert([
-          { question_id: questionId, label: 'True', is_correct: trueFalseAnswer, sort_order: 0 },
-          { question_id: questionId, label: 'False', is_correct: !trueFalseAnswer, sort_order: 1 },
-        ]);
-        if (optErr) throw optErr;
-      }
-
       onSaved();
     } catch (e) {
       console.error('Question save failed', e);
@@ -863,17 +917,21 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-ink-950/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div className="card w-full max-w-4xl max-h-[92vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-        <div className="sticky top-0 bg-white border-b border-ink-100 px-6 py-4 flex items-center justify-between z-10">
-          <div>
-            <h3 className="font-display text-lg font-700 text-ink-900">{editing ? ar.questionBank.editQuestion : ar.questionBank.addQuestion}</h3>
-            <p className="text-xs text-ink-400 mt-1">يدعم الحفظ الذري والتحقق قبل إنشاء السؤال أو تعديله.</p>
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <button onClick={onClose} className="btn-outline shrink-0"><ArrowRight size={16} /> العودة إلى بنك الأسئلة</button>
+          <div className="hidden h-9 w-px bg-ink-200 sm:block" />
+          <div className="min-w-0">
+            <h3 className="truncate font-display text-xl font-700 text-ink-900">{editing ? ar.questionBank.editQuestion : ar.questionBank.addQuestion}</h3>
+            <p className="mt-1 text-sm text-ink-500">أنشئ سؤالًا منظمًا وراجعه قبل إضافته إلى بنك الأسئلة.</p>
           </div>
-          <button onClick={onClose} className="text-ink-400 hover:text-ink-700"><X size={20} /></button>
         </div>
+        <Badge tone={editing ? 'warning' : 'accent'}>{editing ? 'تعديل سؤال' : 'سؤال جديد'}</Badge>
+      </div>
 
-        <div className="p-6 space-y-5">
+      <div className="card overflow-hidden">
+        <div className="space-y-5 p-5 sm:p-6">
           {error && <div data-testid="question-editor-error" className="flex items-center gap-2 p-3 rounded-xl bg-danger-50 border border-danger-200"><AlertCircle size={18} className="text-danger-600" /><p className="text-sm text-danger-700">{error}</p></div>}
 
           <div className="grid md:grid-cols-2 gap-4">
@@ -1036,7 +1094,7 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
           </div>
         </div>
 
-        <div className="sticky bottom-0 bg-white border-t border-ink-100 px-6 py-4 flex justify-end gap-2">
+        <div className="sticky bottom-4 z-20 flex flex-col gap-3 border-t border-ink-100 bg-white/95 px-5 py-4 backdrop-blur sm:flex-row sm:justify-end sm:px-6">
           <button onClick={onClose} className="btn-ghost">{ar.common.cancel}</button>
           <button data-testid="save-question" onClick={handleSave} disabled={saving || !EDITABLE_TYPES.includes(type)} className="btn-primary disabled:opacity-60">
             {saving ? <Loader2 size={16} className="animate-spin" /> : null}

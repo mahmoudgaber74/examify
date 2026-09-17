@@ -100,13 +100,9 @@ function makeQuestionSql(questionId, optionA, optionB, examId, type = 'multiple_
 }
 
 async function createAttempt(client, examId) {
-  const existing = Number(psql(`select count(*) from public.exam_attempts where exam_id = ${sqlValue(examId)}::uuid and student_id = ${sqlValue(ids.studentAProfile)}::uuid;`));
-  const { data, error } = await client
-    .from('exam_attempts')
-    .insert({ exam_id: examId, student_id: ids.studentAProfile, attempt_number: existing + 1, status: 'in_progress' })
-    .select('id')
-    .single();
+  const { data, error } = await client.rpc('start_exam_attempt', { p_exam_id: examId });
   if (error) throw new Error(`createAttempt failed: ${error.message}`);
+  if (!data?.id) throw new Error('createAttempt failed: start_exam_attempt returned no attempt id');
   return data.id;
 }
 
@@ -198,11 +194,11 @@ async function main() {
 
   const attemptCorrect = await createAttempt(clientA, exams.correct);
   const correctRes = await submit(clientA, attemptCorrect, [{ question_id: questions[0], option_id: options[0] }]);
-  record('MCQ', 'correct answer is approved with full score', 'approved|1|100|true', correctRes.error?.message ?? `${correctRes.data?.status}|${correctRes.data?.score}|${Math.round(correctRes.data?.score_percentage)}|${correctRes.data?.is_passed}`, !correctRes.error && correctRes.data.status === 'approved' && Number(correctRes.data.score) === 1 && Math.round(Number(correctRes.data.score_percentage)) === 100 && correctRes.data.is_passed === true);
+  record('MCQ', 'correct answer is graded with full score', 'graded|1|100|true', correctRes.error?.message ?? `${correctRes.data?.status}|${correctRes.data?.score}|${Math.round(correctRes.data?.score_percentage)}|${correctRes.data?.is_passed}`, !correctRes.error && correctRes.data.status === 'graded' && Number(correctRes.data.score) === 1 && Math.round(Number(correctRes.data.score_percentage)) === 100 && correctRes.data.is_passed === true);
 
   const attemptWrong = await createAttempt(clientA, exams.wrong);
   const wrongRes = await submit(clientA, attemptWrong, [{ question_id: questions[1], option_id: options[3] }]);
-  record('MCQ', 'wrong answer is approved with zero score', 'approved|0|0|false', wrongRes.error?.message ?? `${wrongRes.data?.status}|${wrongRes.data?.score}|${Math.round(wrongRes.data?.score_percentage)}|${wrongRes.data?.is_passed}`, !wrongRes.error && wrongRes.data.status === 'approved' && Number(wrongRes.data.score) === 0 && wrongRes.data.is_passed === false);
+  record('MCQ', 'wrong answer is graded with zero score', 'graded|0|0|false', wrongRes.error?.message ?? `${wrongRes.data?.status}|${wrongRes.data?.score}|${Math.round(wrongRes.data?.score_percentage)}|${wrongRes.data?.is_passed}`, !wrongRes.error && wrongRes.data.status === 'graded' && Number(wrongRes.data.score) === 0 && wrongRes.data.is_passed === false);
 
   const attemptUnanswered = await createAttempt(clientA, exams.unanswered);
   const unansweredRes = await submit(clientA, attemptUnanswered, []);
@@ -226,10 +222,10 @@ async function main() {
 
   const attemptTrueFalse = await createAttempt(clientA, exams.trueFalse);
   const trueFalseRes = await submit(clientA, attemptTrueFalse, [{ question_id: questions[7], option_id: options[14] }]);
-  record('TrueFalse', 'true_false answer is auto-graded through options', 'approved|1|100|true', trueFalseRes.error?.message ?? `${trueFalseRes.data?.status}|${trueFalseRes.data?.score}|${Math.round(trueFalseRes.data?.score_percentage)}|${trueFalseRes.data?.is_passed}`, !trueFalseRes.error && trueFalseRes.data.status === 'approved' && Number(trueFalseRes.data.score) === 1 && trueFalseRes.data.is_passed === true);
+  record('TrueFalse', 'true_false answer is auto-graded through options', 'graded|1|100|true', trueFalseRes.error?.message ?? `${trueFalseRes.data?.status}|${trueFalseRes.data?.score}|${Math.round(trueFalseRes.data?.score_percentage)}|${trueFalseRes.data?.is_passed}`, !trueFalseRes.error && trueFalseRes.data.status === 'graded' && Number(trueFalseRes.data.score) === 1 && trueFalseRes.data.is_passed === true);
 
   const doubleSubmit = await submit(clientA, attemptCorrect, [{ question_id: questions[0], option_id: options[0] }]);
-  record('Idempotency', 'second submit is rejected without duplication', 'error', doubleSubmit.error ? doubleSubmit.error.message : 'success', Boolean(doubleSubmit.error));
+  record('Idempotency', 'second submit is safely idempotent without duplication', 'success with stable graded result', doubleSubmit.error?.message ?? `${doubleSubmit.data?.status}|${doubleSubmit.data?.score}`, !doubleSubmit.error && doubleSubmit.data?.status === 'graded' && Number(doubleSubmit.data?.score) === 1);
 
   const attemptOtherOwned = await createAttempt(clientA, exams.otherOwned);
   const otherStudentSubmit = await submit(clientB, attemptOtherOwned, []);

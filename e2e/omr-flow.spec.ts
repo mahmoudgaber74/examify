@@ -40,7 +40,8 @@ test.describe.serial('Bubble Sheet / OMR end-to-end flow', () => {
     `)), { timeout: 20_000 }).toBeGreaterThan(templateCountBefore);
 
     await page.getByTestId('omr-tab-scan').click();
-    await page.locator('select').first().selectOption(s.ids.examA);
+    await page.getByTestId('omr-engine-select').selectOption('basic');
+    await page.getByTestId('omr-scan-exam-select').selectOption(s.ids.examA);
     await page.getByTestId('omr-upload-input').setInputFiles({
       name: `flow-${s.run}.png`,
       mimeType: 'image/png',

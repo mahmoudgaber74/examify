@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { login, monitorPage, state } from './helpers';
+import { confirmAction, login, monitorPage, state } from './helpers';
 
 test.setTimeout(90_000);
 
@@ -10,8 +10,8 @@ test('authenticated core UI is localized to Arabic and remains RTL', async ({ pa
   await page.goto('/');
   await expect(page.locator('html')).toHaveAttribute('lang', 'ar');
   await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
-  await expect(page.getByText('تسجيل الدخول')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'دخول', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: /خلّي وقتك للشرح/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'تسجيل الدخول', exact: true })).toBeVisible();
 
   await login(page, s.users.adminA.email, s.password);
   await expect(page.getByTestId('nav-dashboard').first()).toContainText('لوحة التحكم');
@@ -36,11 +36,7 @@ test('authenticated core UI is localized to Arabic and remains RTL', async ({ pa
 
   await page.getByPlaceholder('ابحث في نص السؤال...').fill(`E2E MCQ ${s.run}`);
   await expect(page.getByText(`E2E MCQ ${s.run}`).first()).toBeVisible({ timeout: 20_000 });
-  page.once('dialog', async (dialog) => {
-    expect(dialog.message()).toContain('هل تريد حذف هذا السؤال؟');
-    await dialog.dismiss();
-  });
-  await page.getByTitle('حذف').first().click();
+  await confirmAction(page, () => page.getByTitle('حذف').first().click(), 'cancel');
 
   for (const pageCheck of [
     { id: 'exambuilder', heading: 'منشئ الاختبارات', forbidden: ['Exam Builder', 'Quick Exam', 'Create Quick Exam'] },

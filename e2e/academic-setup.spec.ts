@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { createClient } from '@supabase/supabase-js';
-import { login, logout, monitorPage, psqlScalar, state } from './helpers';
+import { confirmAction, login, logout, monitorPage, psqlScalar, state } from './helpers';
 
 function sqlValue(value: string) {
   return `'${String(value).replaceAll("'", "''")}'`;
@@ -87,7 +87,7 @@ async function assignTeacher(page: import('@playwright/test').Page, teacherId: s
   await page.getByTestId('academic-select-subject').selectOption(subjectId);
   await page.getByTestId('academic-select-class').selectOption(classId);
   await saveAcademicModal(page);
-  await expect(page.getByText(teacherName)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(teacherName).first()).toBeVisible({ timeout: 15_000 });
   return psql(`select id from public.subject_teachers where teacher_id = ${sqlValue(teacherId)}::uuid and subject_id = ${sqlValue(subjectId)}::uuid and class_id = ${sqlValue(classId)}::uuid and is_active = true limit 1;`);
 }
 
@@ -149,8 +149,7 @@ test.describe('Academic setup acceptance', () => {
     await saveAcademicModal(page);
     await expect(page.getByText(editedStageName)).toBeVisible({ timeout: 15_000 });
 
-    page.once('dialog', (dialog) => dialog.accept());
-    await page.getByTestId(`academic-item-stage-${stageId}-toggle`).click();
+    await confirmAction(page, () => page.getByTestId(`academic-item-stage-${stageId}-toggle`).click());
     await expect.poll(() => psql(`select is_active::text from public.education_stages where id = ${sqlValue(stageId)}::uuid;`)).toBe('false');
     await page.getByTestId(`academic-item-stage-${stageId}-toggle`).click();
     await expect.poll(() => psql(`select is_active::text from public.education_stages where id = ${sqlValue(stageId)}::uuid;`)).toBe('true');

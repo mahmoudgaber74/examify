@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertCircle, BarChart3, Download, Loader2, Target, Users } from 'lucide-react';
 import { Card, Badge, EmptyState, ProgressBar, SectionHeader } from '../components/ui';
+import { Select as DropdownSelect } from '../components/ui/Select';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
+import { MarketingFunnel } from './MarketingFunnel';
 
 type Student = { id: string; full_name: string; is_active: boolean };
 type Subject = { id: string; name: string };
@@ -13,6 +15,7 @@ type ClassStudent = { student_id: string; class_id: string; status: string };
 type ClassRow = { id: string; name: string; branch_id: string | null };
 type Branch = { id: string; name: string };
 type AnalyticsData = { students: Student[]; subjects: Subject[]; exams: Exam[]; attempts: Attempt[]; attendance: Attendance[]; grades: Grade[]; classStudents: ClassStudent[]; classes: ClassRow[]; branches: Branch[] };
+type ItemAnalysis = { question_id: string; question_number: number; prompt: string; attempts_count: number; answered_count: number; correct_count: number; success_rate: number | null; is_difficult: boolean };
 
 const EMPTY: AnalyticsData = { students: [], subjects: [], exams: [], attempts: [], attendance: [], grades: [], classStudents: [], classes: [], branches: [] };
 const ranges = [{ value: '30', label: '30 يوم' }, { value: '90', label: '90 يوم' }, { value: '365', label: 'سنة' }, { value: 'all', label: 'الكل' }];
@@ -22,11 +25,15 @@ function inRange(value: string | null, start: Date | null) { return !start || (v
 function average(values: number[]) { return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0; }
 
 export function Analytics() {
-  const { institutionId } = useAuthSafe();
+  const { institutionId, role } = useAuthSafe();
   const [range, setRange] = useState('30');
   const [data, setData] = useState<AnalyticsData>(EMPTY);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedExamId, setSelectedExamId] = useState('');
+  const [itemAnalysis, setItemAnalysis] = useState<ItemAnalysis[]>([]);
+  const [itemAnalysisLoading, setItemAnalysisLoading] = useState(false);
+  const [itemAnalysisError, setItemAnalysisError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!institutionId) return;
@@ -55,6 +62,19 @@ export function Analytics() {
   }, [institutionId]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (!selectedExamId) { setItemAnalysis([]); setItemAnalysisError(null); return; }
+    let active = true;
+    setItemAnalysisLoading(true); setItemAnalysisError(null);
+    void supabase.rpc('get_exam_item_analysis', { exam_uuid: selectedExamId }).then(({ data, error: rpcError }) => {
+      if (!active) return;
+      if (rpcError) setItemAnalysisError(rpcError.message);
+      setItemAnalysis((data as ItemAnalysis[]) ?? []);
+      setItemAnalysisLoading(false);
+    });
+    return () => { active = false; };
+  }, [selectedExamId]);
 
   const metrics = useMemo(() => {
     const start = sinceDate(range);
@@ -105,10 +125,29 @@ export function Analytics() {
   return <div className="space-y-6">
     <SectionHeader title="التحليلات وذكاء الأعمال" subtitle="مؤشرات حقيقية محسوبة من بيانات مؤسستك" action={<button onClick={exportAnalytics} className="btn-outline"><Download size={16} /> تصدير CSV</button>} />
     <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex gap-1 p-1 bg-white rounded-xl border border-ink-100">{ranges.map((item) => <button key={item.value} onClick={() => setRange(item.value)} className={`px-3 py-1.5 rounded-lg text-xs font-600 ${range === item.value ? 'bg-brand-600 text-white' : 'text-ink-600 hover:bg-ink-50'}`}>{item.label}</button>)}</div><span className="text-xs text-ink-400">البيانات مفلترة حسب الفترة المختارة</span></div>
+    {role === 'super_admin' && <MarketingFunnel />}
     <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">{cards.map(({ label, value, icon: Icon }) => <Card key={label} className="p-4"><div className="flex items-center gap-2 text-ink-500"><Icon size={17} /><span className="text-xs">{label}</span></div><p className="font-display text-2xl font-800 text-ink-900 mt-2 nums-latin">{value}</p></Card>)}</div>
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{[['نسبة النجاح', metrics.passRate, 'من المحاولات التي لها درجات'], ['متوسط الدرجات', metrics.avgScore, 'من الامتحانات والمحاولات']].map(([label, value, note]) => <Card key={String(label)} className="p-5"><div className="flex justify-between text-sm"><span>{label}</span><strong className="nums-latin">{Number(value).toFixed(1)}%</strong></div><ProgressBar value={Number(value)} tone="brand" className="mt-3" /><p className="text-xs text-ink-400 mt-2">{note}</p></Card>)}</div>
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-6"><Card className="p-5"><SectionHeader title="أداء المواد" subtitle="محسوب من درجات المحاولات" />{metrics.subjectPerformance.length ? <div className="space-y-4">{metrics.subjectPerformance.map((row) => <div key={row.name}><div className="flex justify-between text-sm mb-1"><span>{row.name}</span><span className="nums-latin">{row.score.toFixed(1)}% · {row.count} محاولة</span></div><ProgressBar value={row.score} tone={row.score >= 60 ? 'accent' : 'danger'} /></div>)}</div> : <EmptyState title="لا توجد درجات بعد" subtitle="ستظهر هنا نتائج المحاولات المصححة." />}</Card><Card className="p-5"><SectionHeader title="مقارنة الفروع" subtitle="متوسط الدرجات حسب الفرع" />{metrics.branchPerformance.length ? <div className="space-y-4">{metrics.branchPerformance.map((row) => <div key={row.name} className="flex items-center gap-3"><span className="w-32 truncate text-sm">{row.name}</span><div className="flex-1"><ProgressBar value={row.score} tone="brand" /></div><span className="w-20 text-left text-sm nums-latin">{row.score.toFixed(1)}%</span></div>)}</div> : <EmptyState title="لا توجد بيانات فروع" subtitle="اربط الامتحانات بفصول وفروع لتظهر المقارنة." />}</Card></div>
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-6"><Card className="p-5"><SectionHeader title="أعلى الطلاب أداءً" subtitle="حسب متوسط الدرجات" />{metrics.topStudents.length ? <div className="space-y-3">{metrics.topStudents.map((student) => <div key={student.name} className="flex items-center gap-3 p-3 rounded-xl bg-ink-50"><div className="flex-1 font-600">{student.name}<span className="block text-xs text-ink-400">{student.count} محاولة</span></div><strong className="text-accent-700 nums-latin">{student.score.toFixed(1)}%</strong></div>)}</div> : <EmptyState title="لا توجد نتائج" subtitle="سيظهر الطلاب بعد تصحيح المحاولات." />}</Card><Card className="p-5"><SectionHeader title="طلاب يحتاجون متابعة" subtitle="انخفاض الدرجات أو ارتفاع الغياب" />{metrics.riskStudents.length ? <div className="space-y-3">{metrics.riskStudents.map((student) => <div key={student.name} className="flex items-center gap-3 p-3 rounded-xl bg-danger-50"><div className="flex-1 font-600">{student.name}<span className="block text-xs text-ink-500">متوسط: {student.score ? `${student.score.toFixed(1)}%` : 'لا توجد درجات'}</span></div><Badge tone="danger">متابعة</Badge></div>)}</div> : <EmptyState title="لا توجد إشارات خطر" subtitle="لا توجد مؤشرات متابعة في الفترة الحالية." />}</Card></div>
     {!data.students.length && !data.exams.length && !data.grades.length && <Card><EmptyState title="لا توجد بيانات تحليلية بعد" subtitle="ابدأ بإضافة طلاب وإنشاء امتحانات وتسجيل محاولات حتى تظهر المؤشرات الحقيقية." /></Card>}
+    <Card className="p-5">
+      <div className="flex flex-col gap-4 border-b border-ink-100 pb-5 lg:flex-row lg:items-end lg:justify-between">
+        <SectionHeader title="تحليل كل سؤال" subtitle="نسبة الإجابات الصحيحة من المحاولات المصححة والنهائية" />
+        <label className="w-full space-y-1.5 lg:w-80">
+          <span className="label mb-0">الامتحان</span>
+          <DropdownSelect
+            value={selectedExamId}
+            onValueChange={setSelectedExamId}
+            options={[{ value: '', label: 'اختر امتحانًا للتحليل' }, ...data.exams.map((exam) => ({ value: exam.id, label: exam.title }))]}
+            ariaLabel="اختيار الامتحان للتحليل"
+            testId="analytics-exam-select"
+          />
+        </label>
+      </div>
+      {itemAnalysisError && <p className="mt-4 text-sm text-danger-700">تعذر تحميل تحليل الأسئلة: {itemAnalysisError}</p>}
+      {itemAnalysisLoading && <div className="flex justify-center py-6"><Loader2 size={22} className="animate-spin text-brand-600" /></div>}
+      {selectedExamId && !itemAnalysisLoading && !itemAnalysisError && (itemAnalysis.length ? <div className="mt-4 space-y-2">{itemAnalysis.map((item) => <div key={item.question_id} className={`flex items-center gap-3 rounded-xl border p-3 ${item.is_difficult ? 'border-danger-200 bg-danger-50' : 'border-ink-100 bg-ink-50'}`}><span className="w-10 font-800 nums-latin">#{item.question_number}</span><span className="min-w-0 flex-1 truncate">{item.prompt}</span><span className={`text-sm font-700 nums-latin ${item.is_difficult ? 'text-danger-700' : 'text-ink-700'}`}>{item.success_rate === null ? 'لا توجد بيانات' : `${Number(item.success_rate).toFixed(1)}%`}</span>{item.is_difficult && <Badge tone="danger">سؤال صعب — يحتاج إعادة تدريس</Badge>}</div>)}</div> : <EmptyState title="لا توجد بيانات أسئلة نهائية" subtitle="ستظهر النتائج بعد تصحيح محاولات هذا الامتحان." />)}
+    </Card>
   </div>;
 }

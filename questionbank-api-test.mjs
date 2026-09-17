@@ -155,7 +155,7 @@ async function main() {
     'creates valid MCQ through atomic RPC',
     clients.adminA.rpc('save_multiple_choice_question', rpcPayload()),
   );
-  const questionId = createResult.data.question.id;
+  const questionId = createResult.data.question_id;
 
   const optionCount = Number(psql(`select count(*) from public.question_options where question_id = ${sqlValue(questionId)}::uuid;`));
   record('Database', 'valid create stored two options', '2', String(optionCount), optionCount === 2);

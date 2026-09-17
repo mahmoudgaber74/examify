@@ -1,7 +1,6 @@
 import {
   LayoutDashboard,
   FileCheck2,
-  Brain,
   GraduationCap,
   Code2,
   Sigma,
@@ -75,7 +74,7 @@ export const NAV_ITEMS: NavItem[] = [
   { id: 'aiengine', label: 'محرك الذكاء الاصطناعي', icon: Cpu, group: 'الذكاء', badge: 'ذكاء' },
   { id: 'programming', label: 'محرك البرمجة', icon: Code2, group: 'الذكاء' },
   { id: 'math', label: 'محرك الرياضيات', icon: Sigma, group: 'الذكاء' },
-  { id: 'grading', label: 'محرك التصحيح الذكي', icon: Brain, group: 'الذكاء', badge: 'ذكاء' },
+  { id: 'grading', label: 'التصحيح', icon: FileCheck2, group: 'التقييم' },
   { id: 'certification', label: 'الشهادات', icon: Award, group: 'العمليات' },
   { id: 'marketplace', label: 'السوق', icon: Store, group: 'العمليات' },
   { id: 'sis', label: 'نظام معلومات الطلاب', icon: Users, group: 'العمليات' },

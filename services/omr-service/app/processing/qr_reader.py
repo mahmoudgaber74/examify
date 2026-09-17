@@ -1,4 +1,5 @@
 import json
+import uuid
 import cv2
 import numpy as np
 
@@ -8,6 +9,12 @@ def read_qr(image: np.ndarray) -> tuple[str | None, list[str]]:
     value, points, _ = detector.detectAndDecode(image)
     if not value:
         return None, ["qr_not_detected"]
+    if value.startswith("v2:"):
+        try:
+            uuid.UUID(value[3:])
+            return value, []
+        except ValueError:
+            return value, ["qr_payload_invalid"]
     try:
         payload = json.loads(value)
         token = payload.get("t")

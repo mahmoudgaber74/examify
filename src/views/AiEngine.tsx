@@ -145,7 +145,7 @@ function GradingTab() {
   const { institutionId } = useAuthSafe();
   const [attempts, setAttempts] = useState<{ id: string; examify_exams: { title: string }; status: string }[]>([]);
   const [selectedAttempt, setSelectedAttempt] = useState<string | null>(null);
-  const [answers, setAnswers] = useState<{ id: string; question_id: string; text_answer: string | null; questions: { prompt: string; type: string; metadata: any }; awarded_points: number | null }[]>([]);
+  const [answers, setAnswers] = useState<{ id: string; question_id: string; text_answer: string | null; ai_suggested_score: number | null; ai_feedback: string | null; is_teacher_approved: boolean; questions: { prompt: string; type: string; points: number; metadata: any }; awarded_points: number | null }[]>([]);
   const [grading, setGrading] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, AiResultState>>({});
   const [reviewScores, setReviewScores] = useState<Record<string, string>>({});
@@ -159,6 +159,7 @@ function GradingTab() {
       .from('exam_attempts')
       .select('id, status, examify_exams!inner(title)')
       .in('status', ['submitted', 'auto_submitted', 'graded', 'approved'])
+      .eq('examify_exams.institution_id', institutionId)
       .order('submitted_at', { ascending: false })
       .limit(20);
     setAttempts((data as any[]) ?? []);
@@ -172,7 +173,7 @@ function GradingTab() {
     setError(null);
     const { data } = await supabase
       .from('answers')
-      .select('id, question_id, text_answer, awarded_points, questions!inner(prompt, type, metadata)')
+      .select('id, question_id, text_answer, ai_suggested_score, ai_feedback, is_teacher_approved, awarded_points, questions!inner(prompt, type, points, metadata)')
       .eq('attempt_id', attemptId)
       .not('text_answer', 'is', null)
       .in('questions.type', ['short_answer', 'essay']);
@@ -195,6 +196,11 @@ function GradingTab() {
 
     const nextResults: Record<string, AiResultState> = {};
     const nextScores: Record<string, string> = {};
+    for (const answer of loadedAnswers) {
+      if (answer.ai_suggested_score == null) continue;
+      nextResults[answer.id] = mapAiResult({ id: answer.id, ai_score: answer.ai_suggested_score, ai_max_score: answer.questions.points, ai_feedback: answer.ai_feedback ?? '', status: answer.is_teacher_approved ? 'approved' : 'needs_review', requires_review: !answer.is_teacher_approved, structured_result: {} });
+      nextScores[answer.id] = String(answer.ai_suggested_score);
+    }
     for (const row of (aiRows as any[]) ?? []) {
       if (nextResults[row.answer_id]) continue;
       const score = Number(row.final_score ?? row.ai_score ?? 0);
@@ -211,20 +217,31 @@ function GradingTab() {
     setGrading(answerId);
     setError(null);
     try {
-      const { data, error: rpcError } = await supabase.rpc('create_ai_grading_job', { p_answer_id: answerId });
-      if (rpcError) throw rpcError;
-      const row = Array.isArray(data) ? data[0] : data;
-      if (!row) throw new Error('ai_grading_no_result');
-      const mapped = mapAiResult({
-        id: row.job_id,
-        ai_score: row.awarded_points,
-        ai_max_score: row.max_points,
-        ai_feedback: row.structured_result?.summary ?? '',
-        ai_confidence: row.confidence,
-        requires_review: row.requires_review,
-        status: row.status,
-        structured_result: row.structured_result,
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error('Authentication required');
+      const metadata = a.questions.metadata ?? {};
+      const response = await fetch(String(import.meta.env.VITE_SUPABASE_URL) + '/functions/v1/ai-grading', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: session.access_token },
+        body: JSON.stringify({
+          answerId,
+          questionType: a.questions.type,
+          questionPrompt: a.questions.prompt,
+          studentAnswer: a.text_answer,
+          modelAnswer: String(metadata.model_answer ?? metadata.correct_answer ?? ''),
+          rubric: Array.isArray(metadata.rubric) ? metadata.rubric : [],
+          maxScore: a.questions.points,
+        }),
       });
+      if (!response.ok) throw new Error(response.status === 503 ? 'AI service unavailable' : 'AI grading request failed');
+      const suggestion = await response.json();
+      const { error: storeError } = await supabase.rpc('record_ai_answer_suggestion', {
+        p_answer_id: answerId,
+        p_suggested_score: suggestion.suggested_score,
+        p_feedback: suggestion.feedback,
+      });
+      if (storeError) throw storeError;
+      const mapped = mapAiResult({ id: answerId, ai_score: suggestion.suggested_score, ai_max_score: a.questions.points, ai_feedback: suggestion.feedback, ai_confidence: suggestion.confidence, requires_review: true, status: 'needs_review', structured_result: { criteria: (suggestion.rubric_breakdown ?? []).map((item: { criterion: string; score: number; max_score: number }) => ({ name: item.criterion, awarded: item.score, max: item.max_score })) } });
       setResults((prev) => ({ ...prev, [answerId]: mapped }));
       setReviewScores((prev) => ({ ...prev, [answerId]: String(mapped.score) }));
     } catch (e) {
@@ -243,8 +260,8 @@ function GradingTab() {
     try {
       const score = Number(reviewScores[answerId] ?? result.score);
       const reason = reviewReasons[answerId]?.trim() || 'تمت المراجعة من المعلم';
-      const { error: rpcError } = await supabase.rpc('approve_ai_grading_result', {
-        p_result_id: result.id,
+      const { error: rpcError } = await supabase.rpc('approve_ai_answer_score', {
+        p_answer_id: result.id,
         p_final_score: score,
         p_review_reason: reason,
       });
@@ -293,6 +310,7 @@ function GradingTab() {
                 {results[a.id].needsReview && <Badge tone="danger">تحتاج مراجعة</Badge>}
                 {results[a.id].status === 'approved' && <Badge tone="accent">معتمدة</Badge>}
               </div>
+              <p className="text-xs font-700 text-ink-500">AI suggested score: {results[a.id].score}/{results[a.id].maxScore}</p>
               <p data-testid="ai-feedback" className="text-sm text-ink-600">{results[a.id].feedback}</p>
               {Array.isArray(results[a.id].structured?.criteria) && results[a.id].structured.criteria.length > 0 && (
                 <div data-testid="ai-rubric" className="grid sm:grid-cols-2 gap-2">
@@ -310,8 +328,10 @@ function GradingTab() {
                 </div>
               )}
               <div className="grid sm:grid-cols-[140px_1fr_auto] gap-2">
+                <label className="sr-only" htmlFor={`ai-final-score-${a.id}`}>Manual override score</label>
                 <input
                   data-testid="ai-final-score"
+                  id={`ai-final-score-${a.id}`}
                   type="number"
                   min="0"
                   max={results[a.id].maxScore}
@@ -321,8 +341,10 @@ function GradingTab() {
                   onChange={(e) => setReviewScores((prev) => ({ ...prev, [a.id]: e.target.value }))}
                   disabled={results[a.id].status === 'approved'}
                 />
+                <label className="sr-only" htmlFor={`ai-review-reason-${a.id}`}>Teacher review reason</label>
                 <input
                   data-testid="ai-review-reason"
+                  id={`ai-review-reason-${a.id}`}
                   className="input"
                   value={reviewReasons[a.id] ?? ''}
                   onChange={(e) => setReviewReasons((prev) => ({ ...prev, [a.id]: e.target.value }))}
@@ -359,38 +381,49 @@ function GeneratorTab() {
   const [generating, setGenerating] = useState(false);
   const [generated, setGenerated] = useState<any[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [subjectsLoading, setSubjectsLoading] = useState(true);
 
   useEffect(() => {
-    if (!institutionId) return;
-    supabase.from('subjects').select('id, name').eq('institution_id', institutionId).eq('is_active', true).order('name')
-      .then(({ data }) => setSubjects((data as any[]) ?? []));
+    if (!institutionId) { setSubjectsLoading(false); return; }
+    let cancelled = false;
+    setSubjectId('');
+    setSubjectsLoading(true);
+    void (async () => {
+      const { data, error: loadError } = await supabase.from('subjects').select('id, name').eq('institution_id', institutionId).eq('is_active', true).order('name');
+      if (cancelled) return;
+      if (loadError) setError('تعذر تحميل المواد المتاحة لحسابك. تأكد من ربط المادة بالمؤسسة أو بتكليف المعلم.');
+      setSubjects((data as { id: string; name: string }[]) ?? []);
+      if (data?.length) setSubjectId((current) => current || data[0].id);
+      setSubjectsLoading(false);
+    })();
+    return () => { cancelled = true; };
   }, [institutionId]);
 
   async function handleGenerate() {
     setGenerating(true);
     setError(null);
     try {
+      if (subjectsLoading) throw new Error('انتظر حتى يتم تحميل المواد.');
+      if (!subjectId) throw new Error(subjects.length ? 'اختر المادة أولاً.' : 'لا توجد مادة متاحة لحسابك حالياً.');
+      if (!topic.trim()) throw new Error('اكتب موضوع السؤال أولاً.');
       const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ai-question-generator`;
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error('Authentication required');
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+          Authorization: `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({ topic, subject: subjects.find((s) => s.id === subjectId)?.name ?? '', difficulty, type, count, language: 'ar' }),
       });
-      if (!response.ok) throw new Error('فشل التوليد');
+      if (!response.ok) {
+        if (response.status === 503) throw new Error('خدمة توليد الأسئلة غير متاحة حالياً؛ لم يتم إعداد مزود الذكاء الاصطناعي.');
+        if (response.status === 429) throw new Error('تم تجاوز حد الاستخدام مؤقتاً. حاول بعد قليل.');
+        throw new Error('فشل توليد الأسئلة.');
+      }
       const data = await response.json();
       setGenerated(data.questions ?? []);
-      await supabase.from('ai_generated_questions').insert({
-        institution_id: institutionId,
-        subject_id: subjectId || null,
-        topic,
-        difficulty,
-        type,
-        generated_content: data,
-        status: 'draft',
-      });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'حدث خطأ');
     } finally {
@@ -399,6 +432,31 @@ function GeneratorTab() {
   }
 
   async function importQuestion(q: any) {
+    if ((type === 'multiple_choice' || type === 'true_false') && (q.options || type === 'true_false')) {
+      const options = type === 'true_false'
+        ? [
+            { label: 'True', is_correct: q.correct === true, sort_order: 0 },
+            { label: 'False', is_correct: q.correct === false, sort_order: 1 },
+          ]
+        : (q.options as string[]).map((label, i) => ({ label, is_correct: i === q.correct, sort_order: i }));
+      const { error: rpcError } = await supabase.rpc('save_single_answer_question', {
+        p_question_id: null,
+        p_institution_id: institutionId,
+        p_subject_id: subjectId,
+        p_type: type,
+        p_prompt: q.prompt,
+        p_difficulty: difficulty,
+        p_points: 1,
+        p_unit: null,
+        p_lesson: null,
+        p_explanation: null,
+        p_metadata: {},
+        p_options: options,
+      });
+      if (rpcError) { setError(rpcError.message); return; }
+      alert('ØªÙ… Ø§Ø³ØªÙŠØ±Ø§Ø¯ Ø§Ù„Ø³Ø¤Ø§Ù„ Ø¥Ù„Ù‰ Ø¨Ù†Ùƒ Ø§Ù„Ø£Ø³Ø¦Ù„Ø©');
+      return;
+    }
     const questionData = {
       institution_id: institutionId,
       subject_id: subjectId || null,

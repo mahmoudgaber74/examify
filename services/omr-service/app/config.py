@@ -1,11 +1,12 @@
+import os
 from functools import lru_cache
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class Settings(BaseModel):
     service_name: str = "examify-omr-service"
     service_version: str = "0.1.0"
-    service_token: str = Field(default="local-omr-development-token")
+    service_token: str
     max_request_bytes: int = 25 * 1024 * 1024
     max_pages: int = 20
     pdf_dpi: int = 300
@@ -21,11 +22,16 @@ class Settings(BaseModel):
 
 @lru_cache
 def get_settings() -> Settings:
+    environment = os.environ.get("OMR_ENVIRONMENT", "production").strip().lower()
+    service_token = os.environ.get("OMR_SERVICE_TOKEN")
+    if not service_token:
+        if environment in {"local", "development", "dev", "test"}:
+            service_token = "local-omr-development-token"
+        else:
+            raise RuntimeError("OMR_SERVICE_TOKEN is required outside explicit local development")
     return Settings(
-        service_token=__import__("os").environ.get(
-            "OMR_SERVICE_TOKEN", "local-omr-development-token"
-        ),
-        max_request_bytes=int(__import__("os").environ.get("OMR_MAX_REQUEST_BYTES", 25 * 1024 * 1024)),
-        max_pages=int(__import__("os").environ.get("OMR_MAX_PAGES", 20)),
-        pdf_dpi=int(__import__("os").environ.get("OMR_PDF_DPI", 300)),
+        service_token=service_token,
+        max_request_bytes=int(os.environ.get("OMR_MAX_REQUEST_BYTES", 25 * 1024 * 1024)),
+        max_pages=int(os.environ.get("OMR_MAX_PAGES", 20)),
+        pdf_dpi=int(os.environ.get("OMR_PDF_DPI", 300)),
     )

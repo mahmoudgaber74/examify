@@ -163,7 +163,6 @@ test.describe.serial('Advanced question types', () => {
     await expect(page.getByTestId('exam-matching-left_1')).toHaveValue('right_1');
     await page.getByTestId('exam-next-question').click();
 
-    page.once('dialog', (dialog) => dialog.accept());
     await page.getByTestId('exam-submit').click();
     await expect(page.getByTestId('exam-result-percentage')).toContainText('100.0%', { timeout: 20_000 });
     await expect(page.getByTestId('exam-result-score')).toContainText('6.00 / 6');

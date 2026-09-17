@@ -2,6 +2,7 @@ services:
   omr-service:
     build: .
     environment:
+      OMR_ENVIRONMENT: production
       OMR_SERVICE_TOKEN: ${OMR_SERVICE_TOKEN:?Set a strong OMR_SERVICE_TOKEN}
       OMR_MAX_REQUEST_BYTES: ${OMR_MAX_REQUEST_BYTES:-26214400}
       OMR_MAX_PAGES: ${OMR_MAX_PAGES:-20}
@@ -18,10 +19,13 @@ services:
   omr-worker:
     build: .
     command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true
     depends_on:
       omr-service:
         condition: service_healthy
     environment:
+      OMR_ENVIRONMENT: production
       SUPABASE_URL: ${SUPABASE_URL:?Set the production Supabase URL}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?Set the production Supabase service role key}
       OMR_SERVICE_URL: http://omr-service:8080

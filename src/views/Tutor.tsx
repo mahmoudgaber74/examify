@@ -1,224 +1,139 @@
-import { useState, useEffect, useRef } from 'react';
-import { TUTOR_CONVERSATION, LEARNING_PATH, type TutorMessage } from '../lib/data';
-import { supabase, type DbChatMessage } from '../lib/supabase';
-import { Card, Badge, SectionHeader, ProgressBar, Avatar } from '../components/ui';
-import {
-  Sparkles, Send, Paperclip, Mic, Lightbulb, FileQuestion, PlayCircle, Map,
-  CheckCircle2, Lock, Circle, Compass, BookOpen, Award, TrendingUp, Volume2, Languages,
-  Trash2,
-} from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { supabase } from '../lib/supabase';
+import { Card, Badge, Avatar } from '../components/ui';
+import { Sparkles, Send, Trash2, Loader2, Image, Mic, Square, Paperclip } from 'lucide-react';
 
-const ATTACH_ICON = { flashcard: Lightbulb, quiz: FileQuestion, video: PlayCircle, plan: Map };
-
-const TUTOR_REPLIES = [
-  'سؤال ممتاز! دعني أشرّحه خطوة بخطوة. الفكرة الأساسية هنا هي فهم العلاقة بين المفاهيم. أولاً، نحدّد المتغيّرات المعروفة والمجهولة، ثم نطبّق القاعدة المناسبة. هل تريد مثالاً تطبيقياً؟',
-  'فكرة جيدة! هذا المفهوم يبني على ما تعلّمناه سابقاً. لقد أنشأت بطاقات مراجعة وتمريناً قصيراً مصمّماً لمستواك الحالي. جرّبها ثم أخبرني كيف سارت.',
-  'دعني أساعدك! هذا موضوع شائع يواجهه كثير من الطلاب. الحل يكمن في تقسيم المشكلة لأجزاء أصغر. أولاً، حلّل ما يُطلب. ثانياً، حدّد الأدوات المتاحة. ثالثاً، طبّق خطوة واحدة في كل مرة.',
-  'إجابة جيدة جزئياً! أنت على المسار الصحيح لكن هناك نقطة واحدة تحتاج توضيحاً. لقد أنشأت شرحاً مصوّراً ومجموعة تمارين لتثبيت المفهوم.',
-  'ممتاز! يبدو أنك فهمت الفكرة الأساسية. للتعمّق أكثر، أنصحك بمحاولة المسألة التالية في مسار تعلّمك. لقد أضفتها كخطوة تالية.',
-];
+type TutorMessage = { id: string; role: 'student' | 'tutor'; content: string; created_at?: string; attachment_url?: string | null; attachment_type?: 'image' | 'audio' | null; attachment_mime_type?: string | null; audio_transcript?: string | null; attachmentPreviewUrl?: string };
+type PendingAttachment = { path: string; type: 'image' | 'audio'; mimeType: string; signedUrl: string };
+const BUCKET = 'tutor_attachments';
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+const AUDIO_MIME_TYPES = ['audio/webm', 'audio/webm;codecs=opus', 'audio/ogg', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/mpeg'];
+const RECORDING_MIME_TYPES = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg', 'audio/mp4'];
 
 export function Tutor() {
-  const [messages, setMessages] = useState<TutorMessage[]>(TUTOR_CONVERSATION);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<TutorMessage[]>([]);
   const [input, setInput] = useState('');
-  const [typing, setTyping] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pendingAttachment, setPendingAttachment] = useState<PendingAttachment | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const attachmentRef = useRef<HTMLInputElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
-  const fetchMessages = async () => {
-    const { data } = await supabase.from('chat_messages').select('*').order('created_at', { ascending: true }).limit(20);
-    if (data && data.length > 0) {
-      const mapped: TutorMessage[] = (data as DbChatMessage[]).map((d) => ({
-        id: d.id,
-        role: d.role as 'tutor' | 'student',
-        content: d.content,
-        time: new Date().toLocaleTimeString(['ar'], { hour: '2-digit', minute: '2-digit' }),
-        attachments: (d.attachments as TutorMessage['attachments']) ?? undefined,
-      }));
-      setMessages(mapped);
+  async function signedMessages(rows: TutorMessage[]) {
+    return Promise.all(rows.map(async (message) => {
+      if (!message.attachment_url) return message;
+      const { data } = await supabase.storage.from(BUCKET).createSignedUrl(message.attachment_url, 60 * 60);
+      return { ...message, attachmentPreviewUrl: data?.signedUrl };
+    }));
+  }
+
+  async function loadSession() {
+    setLoading(true); setError(null);
+    const { data: conversation, error: conversationError } = await supabase.rpc('get_or_create_tutor_conversation');
+    if (conversationError || !conversation) { setError('Tutor session could not be created.'); setLoading(false); return; }
+    const active = Array.isArray(conversation) ? conversation[0] : conversation;
+    setConversationId(active.id);
+    const { data, error: messagesError } = await supabase.from('tutor_messages').select('id, role, content, created_at, attachment_url, attachment_type, attachment_mime_type, audio_transcript').eq('conversation_id', active.id).order('created_at', { ascending: true }).limit(100);
+    if (messagesError) setError('Tutor session could not be loaded.');
+    setMessages(await signedMessages((data as TutorMessage[]) ?? []));
+    setLoading(false);
+  }
+
+  useEffect(() => { void loadSession(); }, []);
+  useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }); }, [messages]);
+  useEffect(() => () => {
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+    recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    recordingStreamRef.current = null;
+  }, []);
+
+  async function uploadAttachment(file: File | Blob, type: 'image' | 'audio', mimeType = file.type) {
+    if (!conversationId) return;
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { setError('Your session has expired.'); return; }
+    const allowedTypes = type === 'image' ? IMAGE_MIME_TYPES : AUDIO_MIME_TYPES;
+    if (!allowedTypes.includes(mimeType)) { setError(type === 'audio' ? 'This audio format is unavailable.' : 'This image format is unavailable.'); return; }
+    if (file.size <= 0 || file.size > MAX_ATTACHMENT_BYTES) { setError('Attachment must be smaller than 10 MB.'); return; }
+    const baseMimeType = mimeType.split(';', 1)[0];
+    const extension = mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : baseMimeType === 'audio/ogg' ? 'ogg' : baseMimeType === 'audio/mp4' ? 'm4a' : baseMimeType === 'audio/mpeg' ? 'mp3' : type === 'audio' ? 'webm' : 'jpg';
+    const path = `${user.id}/${conversationId}/${crypto.randomUUID()}.${extension}`;
+    const { error: uploadError } = await supabase.storage.from(BUCKET).upload(path, file, { contentType: mimeType, upsert: false });
+    if (uploadError) { setError(`Attachment upload failed: ${uploadError.message}`); return; }
+    const { data: signed, error: signedError } = await supabase.storage.from(BUCKET).createSignedUrl(path, 60 * 60);
+    if (signedError || !signed?.signedUrl) { setError('Attachment preview is unavailable.'); return; }
+    setPendingAttachment({ path, type, mimeType, signedUrl: signed.signedUrl });
+  }
+
+  async function chooseImage(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (file) await uploadAttachment(file, 'image');
+    event.target.value = '';
+  }
+
+  async function toggleRecording() {
+    if (recording) { recorderRef.current?.stop(); return; }
+    if (!navigator.mediaDevices?.getUserMedia || typeof window.MediaRecorder === 'undefined') { setError('Voice recording is unavailable in this browser.'); return; }
+    const mimeType = RECORDING_MIME_TYPES.find((candidate) => MediaRecorder.isTypeSupported(candidate));
+    if (!mimeType) { setError('This browser does not support a compatible voice format.'); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      recordingStreamRef.current = stream;
+      const recorder = new MediaRecorder(stream, { mimeType });
+      chunksRef.current = [];
+      recorder.ondataavailable = (event) => { if (event.data.size) chunksRef.current.push(event.data); };
+      recorder.onerror = () => { stream.getTracks().forEach((track) => track.stop()); recordingStreamRef.current = null; setRecording(false); setError('Voice recording failed unexpectedly.'); };
+      recorder.onstop = () => { stream.getTracks().forEach((track) => track.stop()); recordingStreamRef.current = null; const blob = new Blob(chunksRef.current, { type: recorder.mimeType || mimeType }); void uploadAttachment(blob, 'audio', recorder.mimeType || mimeType); setRecording(false); };
+      recorderRef.current = recorder; recorder.start(); setRecording(true); setError(null);
+    } catch (cause) {
+      const name = cause instanceof DOMException ? cause.name : '';
+      if (name === 'NotAllowedError' || name === 'SecurityError') setError('Microphone permission was denied.');
+      else if (name === 'NotFoundError') setError('No microphone was found.');
+      else if (name === 'NotReadableError') setError('The microphone is busy or unavailable.');
+      else if (name === 'OverconstrainedError') setError('The requested microphone is unavailable.');
+      else setError('Microphone access is unavailable.');
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = null;
     }
-  };
+  }
 
-  useEffect(() => { fetchMessages(); }, []);
+  async function send() {
+    const content = input.trim();
+    if ((!content && !pendingAttachment) || sending || !conversationId) return;
+    setSending(true); setError(null); setInput('');
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { setError('Your session has expired. Please sign in again.'); setSending(false); return; }
+    const attachment = pendingAttachment;
+    const { data, error: insertError } = await supabase.from('tutor_messages').insert({ conversation_id: conversationId, user_id: user.id, role: 'student', content: content || 'Please analyze this attachment.', attachment_url: attachment?.path ?? null, attachment_type: attachment?.type ?? null, attachment_mime_type: attachment?.mimeType ?? null }).select('id, role, content, created_at, attachment_url, attachment_type, attachment_mime_type, audio_transcript').single();
+    if (insertError) { setError('Your message could not be saved.'); setSending(false); return; }
+    if (data) setMessages((current) => [...current, { ...(data as TutorMessage), attachmentPreviewUrl: attachment?.signedUrl }]);
+    setPendingAttachment(null);
+    const { data: aiData, error: aiError } = await supabase.functions.invoke('ai-tutor', { body: { conversation_id: conversationId, content, attachment_url: attachment?.path, attachment_type: attachment?.type } });
+    if (aiError || !aiData?.message) setError('Tutor AI is unavailable; your message was saved without an automated reply.');
+    else setMessages((current) => [...current, aiData.message as TutorMessage]);
+    setSending(false);
+  }
 
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, typing]);
+  async function clear() {
+    if (!conversationId) return;
+    const { error: deleteError } = await supabase.from('tutor_messages').delete().eq('conversation_id', conversationId);
+    if (deleteError) setError('The conversation could not be cleared.'); else setMessages([]);
+  }
 
-  const send = async () => {
-    if (!input.trim() || typing) return;
-    const userMsg: TutorMessage = { id: `m${Date.now()}`, role: 'student', content: input, time: new Date().toLocaleTimeString(['ar'], { hour: '2-digit', minute: '2-digit' }) };
-    setMessages((m) => [...m, userMsg]);
-    const sentText = input;
-    setInput('');
-    setTyping(true);
-
-    await supabase.from('chat_messages').insert({ role: 'student', content: sentText });
-
-    setTimeout(async () => {
-      const replyText = TUTOR_REPLIES[Math.floor(Math.random() * TUTOR_REPLIES.length)];
-      const attachments = Math.random() > 0.5
-        ? [{ type: 'flashcard' as const, label: 'ملخّص المفهوم' }, { type: 'quiz' as const, label: '3 أسئلة تمارين' }]
-        : undefined;
-      const reply: TutorMessage = {
-        id: `m${Date.now() + 1}`,
-        role: 'tutor',
-        content: replyText,
-        time: new Date().toLocaleTimeString(['ar'], { hour: '2-digit', minute: '2-digit' }),
-        attachments,
-      };
-      setMessages((m) => [...m, reply]);
-      setTyping(false);
-      await supabase.from('chat_messages').insert({ role: 'tutor', content: replyText, attachments });
-    }, 1200 + Math.random() * 800);
-  };
-
-  const clearChat = async () => {
-    await supabase.from('chat_messages').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-    setMessages(TUTOR_CONVERSATION);
-  };
-
-  const speakLastReply = () => {
-    const lastTutorMessage = [...messages].reverse().find((message) => message.role === 'tutor');
-    if (!lastTutorMessage || !('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(lastTutorMessage.content));
-  };
-
-  const startVoiceInput = () => {
-    const Recognition = (window as Window & { SpeechRecognition?: new () => { lang: string; start: () => void; onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null } }).SpeechRecognition;
-    if (!Recognition) {
-      setInput((current) => current || 'اكتب سؤالك هنا ثم اضغط إرسال');
-      return;
-    }
-    const recognition = new Recognition();
-    recognition.lang = 'ar-EG';
-    recognition.onresult = (event) => setInput(event.results[0][0].transcript);
-    recognition.start();
-  };
-
-  return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        <Card className="xl:col-span-2 flex flex-col h-[640px]">
-          <div className="flex items-center gap-3 p-4 border-b border-ink-100">
-            <div className="grid place-items-center w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white"><Sparkles size={20} /></div>
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <h3 className="font-display font-700 text-ink-900">المعلّم الذكي</h3>
-                <Badge tone="accent"><span className="w-1.5 h-1.5 rounded-full bg-accent-500 animate-pulse-soft" /> متصل</Badge>
-              </div>
-              <p className="text-xs text-ink-500">شخصي · متعدد اللغات · يدعم الصوت</p>
-            </div>
-            <button onClick={clearChat} className="grid place-items-center w-9 h-9 rounded-lg text-ink-500 hover:bg-danger-50 hover:text-danger-600 transition" title="مسح المحادثة"><Trash2 size={17} /></button>
-            <button onClick={speakLastReply} className="grid place-items-center w-9 h-9 rounded-lg text-ink-500 hover:bg-ink-100" title="صوت"><Volume2 size={18} /></button>
-            <button onClick={() => setInput((current) => current ? `${current} (بالعربية)` : 'اشرح لي بالعربية')} className="grid place-items-center w-9 h-9 rounded-lg text-ink-500 hover:bg-ink-100" title="لغة"><Languages size={18} /></button>
-          </div>
-
-          <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4 bg-ink-50/40">
-            {messages.map((msg) => (
-              <div key={msg.id} className={`flex gap-3 animate-fade-in ${msg.role === 'student' ? 'flex-row-reverse' : ''}`}>
-                <div className={`grid place-items-center w-8 h-8 rounded-lg shrink-0 ${msg.role === 'tutor' ? 'bg-brand-600 text-white' : 'bg-ink-200 text-ink-700'}`}>
-                  {msg.role === 'tutor' ? <Sparkles size={15} /> : <Avatar name="أنت" size={32} />}
-                </div>
-                <div className={`max-w-[78%] flex flex-col ${msg.role === 'student' ? 'items-end' : 'items-start'}`}>
-                  <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${msg.role === 'tutor' ? 'bg-white border border-ink-100 text-ink-800 rounded-tr-sm' : 'bg-brand-600 text-white rounded-tl-sm'}`}>
-                    {msg.content}
-                  </div>
-                  {msg.attachments && (
-                    <div className="flex flex-wrap gap-2 mt-2">
-                      {msg.attachments.map((a, idx) => {
-                        const Icon = ATTACH_ICON[a.type];
-                        return (
-                          <button key={idx} onClick={() => setInput(a.label)} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white border border-ink-200 text-xs font-600 text-ink-700 hover:border-brand-300 hover:bg-brand-50 transition">
-                            <Icon size={13} className="text-brand-600" /> {a.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                  <span className="text-[10px] text-ink-400 mt-1 px-1 nums-latin">{msg.time}</span>
-                </div>
-              </div>
-            ))}
-            {typing && (
-              <div className="flex gap-3 animate-fade-in">
-                <div className="grid place-items-center w-8 h-8 rounded-lg shrink-0 bg-brand-600 text-white"><Sparkles size={15} /></div>
-                <div className="flex items-center gap-1.5 bg-white border border-ink-100 rounded-2xl rounded-tr-sm px-4 py-3">
-                  <span className="w-2 h-2 rounded-full bg-brand-400 animate-pulse-soft" />
-                  <span className="w-2 h-2 rounded-full bg-brand-400 animate-pulse-soft" style={{ animationDelay: '0.2s' }} />
-                  <span className="w-2 h-2 rounded-full bg-brand-400 animate-pulse-soft" style={{ animationDelay: '0.4s' }} />
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="p-3 border-t border-ink-100">
-            <div className="flex items-center gap-2 bg-ink-50 rounded-xl px-3 py-2">
-              <button onClick={() => attachmentRef.current?.click()} className="text-ink-400 hover:text-ink-700" title="إرفاق ملف"><Paperclip size={18} /></button>
-              <input ref={attachmentRef} type="file" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) setInput(`اشرح لي هذا الملف: ${file.name}`); }} />
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && send()}
-                placeholder="اسأل معلّمك الذكي أي شيء…"
-                className="flex-1 bg-transparent text-sm outline-none placeholder:text-ink-400"
-              />
-              <button onClick={startVoiceInput} className="text-ink-400 hover:text-ink-700" title="إملاء صوتي"><Mic size={18} /></button>
-              <button onClick={send} disabled={typing || !input.trim()} className="grid place-items-center w-9 h-9 rounded-lg bg-brand-600 text-white hover:bg-brand-700 transition disabled:opacity-50"><Send size={16} /></button>
-            </div>
-          </div>
-        </Card>
-
-        <div className="space-y-6">
-          <Card className="p-6">
-            <SectionHeader title="مسار التعلّم التكيّفي" subtitle="مولّد بواسطة وكيل مدرب التعلّم" action={<Compass size={18} className="text-brand-600" />} />
-            <div className="relative">
-              <div className="absolute right-[15px] top-2 bottom-2 w-0.5 bg-ink-100" />
-              <div className="space-y-1">
-                {LEARNING_PATH.map((step) => {
-                  const Icon = step.status === 'done' ? CheckCircle2 : step.status === 'active' ? Circle : Lock;
-                  const tone = step.status === 'done' ? 'text-accent-600 bg-accent-50' : step.status === 'active' ? 'text-brand-600 bg-brand-50 ring-2 ring-brand-200' : 'text-ink-300 bg-ink-100';
-                  return (
-                    <div key={step.id} className="relative flex gap-3.5 p-2.5 rounded-xl hover:bg-ink-50 transition">
-                      <div className={`grid place-items-center w-8 h-8 rounded-full shrink-0 z-10 ${tone}`}>
-                        <Icon size={step.status === 'active' ? 18 : 16} />
-                      </div>
-                      <div className="flex-1 min-w-0 pt-0.5">
-                        <div className="flex items-center gap-2">
-                          <p className={`text-sm font-600 ${step.status === 'locked' ? 'text-ink-400' : 'text-ink-900'}`}>{step.title}</p>
-                          {step.status === 'active' && <Badge tone="brand">الآن</Badge>}
-                        </div>
-                        <p className="text-[11px] text-ink-400 mt-0.5 nums-latin">{step.type} · {step.duration}</p>
-                        <p className="text-xs text-ink-500 mt-1 leading-relaxed">{step.rationale}</p>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </Card>
-
-          <Card className="p-6">
-            <SectionHeader title="الأهداف الأسبوعية" />
-            <div className="space-y-3">
-              {[{ label: 'دروس مكتملة', value: 4, total: 6, icon: BookOpen, tone: 'brand' as const }, { label: 'مسائل تمارين', value: 18, total: 25, icon: FileQuestion, tone: 'accent' as const }, { label: 'تقييمات مجتازة', value: 2, total: 3, icon: Award, tone: 'gold' as const }].map((g) => (
-                <div key={g.label}>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="flex items-center gap-2 text-sm text-ink-700"><g.icon size={15} className="text-ink-400" /> {g.label}</span>
-                    <span className="text-xs font-600 text-ink-600 nums-latin">{g.value}/{g.total}</span>
-                  </div>
-                  <ProgressBar value={(g.value / g.total) * 100} tone={g.tone} />
-                </div>
-              ))}
-            </div>
-            <div className="mt-4 p-3 rounded-xl bg-accent-50 border border-accent-100 flex items-center gap-2.5">
-              <TrendingUp size={18} className="text-accent-600 shrink-0" />
-              <p className="text-xs text-accent-800">النتيجة المتوقّعة: تحسّن <span className="font-700 nums-latin">+6.2%</span> في التقييم القادم</p>
-            </div>
-          </Card>
-        </div>
-      </div>
-    </div>
-  );
+  return <div className="space-y-6">
+    {error && <div className="rounded-xl border border-warning-200 bg-warning-50 p-3 text-sm text-warning-800">{error}</div>}
+    <Card className="flex h-[640px] flex-col">
+      <div className="flex items-center gap-3 border-b border-ink-100 p-4"><div className="grid h-10 w-10 place-items-center rounded-xl bg-brand-600 text-white"><Sparkles size={20} /></div><div className="flex-1"><h3 className="font-display font-700 text-ink-900">Tutor AI</h3><Badge tone="brand">Text, image and voice</Badge></div><button onClick={() => void clear()} disabled={!conversationId || loading} className="grid h-9 w-9 place-items-center rounded-lg text-ink-500 hover:bg-danger-50"><Trash2 size={17} /></button></div>
+      <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto bg-ink-50/40 p-4">{loading ? <Loader2 className="mx-auto animate-spin text-brand-600" /> : messages.length === 0 ? <p className="py-12 text-center text-sm text-ink-500">No messages in this session.</p> : messages.map((message) => <div key={message.id} className={`flex gap-3 ${message.role === 'student' ? 'flex-row-reverse' : ''}`}><Avatar name={message.role === 'student' ? 'You' : 'AI'} size={32} /><div className="max-w-[78%] rounded-2xl bg-white px-4 py-2.5 text-sm text-ink-800"><p>{message.content}</p>{message.attachmentPreviewUrl && message.attachment_type === 'image' && <img src={message.attachmentPreviewUrl} alt="Tutor attachment" className="mt-2 max-h-56 rounded-lg object-contain" />}{message.attachmentPreviewUrl && message.attachment_type === 'audio' && <audio controls src={message.attachmentPreviewUrl} className="mt-2 max-w-full" />}</div></div>)}</div>
+      {pendingAttachment && <div className="flex items-center gap-2 border-t border-ink-100 bg-brand-50 p-2 text-xs text-brand-800"><Paperclip size={14} /> {pendingAttachment.type === 'image' ? 'Image attached' : 'Voice message attached'}<button onClick={() => setPendingAttachment(null)} className="mr-auto underline">Remove</button></div>}
+      <div className="flex items-center gap-2 border-t border-ink-100 p-3"><input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void chooseImage(event)} className="hidden" /><button onClick={() => fileRef.current?.click()} disabled={loading || sending || !conversationId} className="btn-ghost" title="Attach image"><Image size={18} /></button><button onClick={() => void toggleRecording()} disabled={loading || sending || !conversationId} className={`btn-ghost ${recording ? 'text-danger-600' : ''}`} title={recording ? 'Stop recording' : 'Record voice'}>{recording ? <Square size={18} /> : <Mic size={18} />}</button><input value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void send(); }} disabled={loading || sending || !conversationId} className="input flex-1" placeholder="Ask Tutor AI..." /><button onClick={() => void send()} disabled={loading || sending || (!input.trim() && !pendingAttachment) || !conversationId} className="btn-primary">{sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}</button></div>
+    </Card>
+  </div>;
 }

@@ -1,44 +1,62 @@
 import { useState, useEffect } from 'react';
 import { GraduationCap, Loader2, AlertCircle, LogIn, UserPlus, Building2, ShieldCheck } from 'lucide-react';
-import { signIn, signUp, getInstitutions, canBootstrapFirstAdmin, requestPasswordReset, updatePassword, signOut, type UserRole } from '../lib/auth';
+import { signIn, signUp, getInstitutions, requestPasswordReset, updatePassword, type UserRole } from '../lib/auth';
+import { useAuth } from '../components/AuthProvider';
+import { Select } from '../components/ui/Select';
+import { trackMarketingEvent } from '../lib/marketing-analytics';
 
 interface InstitutionOption {
   id: string;
   name: string;
 }
 
+interface AuthProps {
+  initialMode?: 'login' | 'signup';
+  initialSignupType?: 'institution' | 'existing';
+  onBackToLanding?: () => void;
+}
+
 const ROLE_LABELS: { value: UserRole; label: string; selfRegister: boolean }[] = [
-  { value: 'super_admin', label: 'مدير النظام', selfRegister: true },
   { value: 'school_admin', label: 'مدير المدرسة', selfRegister: true },
   { value: 'teacher', label: 'معلم', selfRegister: true },
   { value: 'student', label: 'طالب', selfRegister: true },
   { value: 'parent', label: 'ولي أمر', selfRegister: true },
 ];
 
-export function Auth() {
-  const [mode, setMode] = useState<'login' | 'signup' | 'reset-request' | 'reset-password'>('login');
+export function Auth({ initialMode = 'login', initialSignupType = 'institution', onBackToLanding }: AuthProps) {
+  const { isPasswordRecovery, signOut } = useAuth();
+  const [mode, setMode] = useState<'login' | 'signup' | 'reset-request' | 'reset-password'>(initialMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [passwordConfirmation, setPasswordConfirmation] = useState('');
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
   const [role, setRole] = useState<UserRole>('student');
-  const [institutionId, setInstitutionId] = useState('');
+  const [signupType, setSignupType] = useState<'institution' | 'existing'>(initialSignupType);
   const [institutionName, setInstitutionName] = useState('');
+  const [institutionId, setInstitutionId] = useState('');
   const [institutions, setInstitutions] = useState<InstitutionOption[]>([]);
   const [institutionsLoaded, setInstitutionsLoaded] = useState(false);
   const [institutionsLoadError, setInstitutionsLoadError] = useState<string | null>(null);
-  const [firstAdminAvailable, setFirstAdminAvailable] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
   useEffect(() => {
-    if (window.location.hash.includes('type=recovery')) setMode('reset-password');
-  }, []);
+    if (isPasswordRecovery) setMode('reset-password');
+  }, [isPasswordRecovery]);
+
+  useEffect(() => {
+    if (mode === 'signup') trackMarketingEvent('signup_start', { step: 'signup_form', signup_type: signupType });
+  }, [mode, signupType]);
 
   useEffect(() => {
     if (mode !== 'signup') return;
+    if (signupType === 'institution') {
+      setInstitutionsLoaded(true);
+      setInstitutionsLoadError(null);
+      return;
+    }
     let cancelled = false;
     setInstitutionsLoaded(false);
     setInstitutionsLoadError(null);
@@ -50,19 +68,13 @@ export function Auth() {
     }).finally(() => {
       if (!cancelled) setInstitutionsLoaded(true);
     });
-    canBootstrapFirstAdmin().then(({ data, error: loadError }) => {
-      if (!cancelled && !loadError) setFirstAdminAvailable(data === true);
-    });
     return () => { cancelled = true; };
-  }, [mode]);
+  }, [mode, signupType]);
 
-  const needsInstitution = role !== 'super_admin';
-  const isFirstUser = institutionsLoaded && firstAdminAvailable;
-  const availableRoles = ROLE_LABELS.filter((r) => (
-    institutionsLoaded
-      ? (isFirstUser ? r.value === 'super_admin' : r.value !== 'super_admin')
-      : r.value !== 'super_admin'
-  ));
+  const needsInstitution = signupType === 'existing';
+  const availableRoles = signupType === 'institution'
+    ? ROLE_LABELS.filter((r) => r.value === 'school_admin')
+    : ROLE_LABELS;
 
   useEffect(() => {
     if (!institutionsLoaded) return;
@@ -80,8 +92,8 @@ export function Auth() {
       setLoading(true);
       try {
         const { error: err } = await requestPasswordReset(email);
-        if (err) setError(err.message.includes('redirect') ? 'رابط إعادة التعيين غير مضبوط. أعد تشغيل خدمات Supabase المحلية ثم حاول مرة أخرى.' : err.message);
-        else setInfo('تم إرسال رابط إعادة تعيين كلمة المرور. في الوضع المحلي افتح صندوق البريد التجريبي على http://127.0.0.1:54324 لرؤية الرسالة.');
+        if (err) setError(err.message.includes('redirect') ? 'رابط إعادة التعيين غير مضبوط. حاول مرة أخرى لاحقًا.' : err.message);
+        else setInfo('تم إرسال رابط إعادة تعيين كلمة المرور إلى بريدك الإلكتروني.');
       } finally {
         setLoading(false);
       }
@@ -116,6 +128,7 @@ export function Auth() {
     }
 
     if (mode === 'signup') {
+      trackMarketingEvent('signup_submit', { step: 'signup_form', role, signup_type: signupType });
       if (!institutionsLoaded) {
         setError('جارٍ تحميل المؤسسات. حاول مرة أخرى بعد لحظات.');
         return;
@@ -128,16 +141,8 @@ export function Auth() {
         setError('كلمة المرور يجب أن تكون 6 أحرف على الأقل');
         return;
       }
-      if (isFirstUser && role !== 'super_admin') {
-        setError('يجب أن يكون الحساب الأول مدير النظام.');
-        return;
-      }
-      if (!isFirstUser && role === 'super_admin') {
-        setError('التسجيل الذاتي لمدير النظام متاح فقط أثناء الإعداد الأول.');
-        return;
-      }
-      if (role === 'super_admin' && isFirstUser && !institutionName.trim()) {
-        setError('أدخل اسم المؤسسة الرئيسية.');
+      if (signupType === 'institution' && institutionName.trim().length < 2) {
+        setError('اكتب اسم المؤسسة بشكل صحيح');
         return;
       }
       if (needsInstitution && !institutionId) {
@@ -152,7 +157,10 @@ export function Auth() {
       if (mode === 'login') {
         const { error: err } = await signIn(email, password);
         if (err) {
+          trackMarketingEvent('login_error', { method: 'email', reason: err.message.slice(0, 120) });
           setError(err.message === 'Invalid login credentials' ? 'البريد الإلكتروني أو كلمة المرور غير صحيحة. تأكد من استخدام نفس قاعدة البيانات المحلية التي سجلت عليها.' : err.message.includes('Email not confirmed') ? 'يجب تأكيد البريد الإلكتروني قبل تسجيل الدخول.' : err.message);
+        } else {
+          trackMarketingEvent('login', { method: 'email' });
         }
       } else {
         const { error: err } = await signUp({
@@ -162,11 +170,18 @@ export function Auth() {
           fullName,
           phone,
           institutionId: institutionId || undefined,
-          institutionName: isFirstUser ? institutionName : undefined,
+          institutionName: signupType === 'institution' ? institutionName.trim() : undefined,
         });
         if (err) {
-          setError(err.message);
+          trackMarketingEvent('signup_error', { method: 'email', reason: err.message.slice(0, 120) });
+          const friendlyError = err.message === 'institution_name_invalid'
+            ? 'اسم المؤسسة يجب أن يكون بين حرفين و160 حرفًا.'
+            : err.message === 'school_admin_requires_institution'
+              ? 'اختر إنشاء مؤسسة جديدة أو اختر مؤسسة موجودة للانضمام إليها.'
+              : err.message;
+          setError(friendlyError);
         } else {
+          trackMarketingEvent('sign_up', { method: 'email', role, signup_type: signupType });
           setInfo('تم إنشاء الحساب بنجاح. تحقق من بريدك الإلكتروني لتأكيد الحساب ثم سجّل الدخول.');
           setMode('login');
         }
@@ -189,6 +204,12 @@ export function Auth() {
           <h1 className="font-display text-2xl font-800 text-ink-900">إكزاميفاي AI</h1>
           <p className="text-sm text-ink-500 mt-1">منصة التصحيح الإلكتروني وإدارة الامتحانات</p>
         </div>
+
+        {onBackToLanding && (
+          <button type="button" onClick={onBackToLanding} className="mb-4 w-full text-center text-sm text-brand-600 hover:text-brand-700">
+            العودة إلى الصفحة الرئيسية
+          </button>
+        )}
 
         <div className="card p-6 sm:p-8">
           {/* Tabs */}
@@ -227,39 +248,66 @@ export function Auth() {
             {mode === 'signup' && (
               <>
                 <div>
+                  <label className="label">طريقة إنشاء الحساب</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSignupType('institution');
+                        setRole('school_admin');
+                        setInstitutionId('');
+                        trackMarketingEvent('signup_step', { step: 'signup_type_selected', signup_type: 'institution' });
+                      }}
+                      className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-600 transition-colors ${signupType === 'institution' ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-ink-200 text-ink-500 hover:border-brand-300'}`}
+                    >
+                      <Building2 size={17} /> إنشاء مؤسسة
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSignupType('existing');
+                        setRole('teacher');
+                        setInstitutionName('');
+                        trackMarketingEvent('signup_step', { step: 'signup_type_selected', signup_type: 'existing' });
+                      }}
+                      className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-600 transition-colors ${signupType === 'existing' ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-ink-200 text-ink-500 hover:border-brand-300'}`}
+                    >
+                      <UserPlus size={17} /> الانضمام لمؤسسة
+                    </button>
+                  </div>
+                  <p className="text-xs text-ink-400 mt-2">
+                    {signupType === 'institution' ? 'أنشئ مساحة مؤسستك وابدأ التجربة المجانية.' : 'اختر مؤسسة موجودة ليتم تفعيل حسابك من إدارتها.'}
+                  </p>
+                </div>
+
+                {signupType === 'institution' && (
+                  <div>
+                    <label className="label">اسم المؤسسة</label>
+                    <input className="input" value={institutionName} onChange={(e) => setInstitutionName(e.target.value)} required placeholder="مثال: مدرسة المستقبل" />
+                  </div>
+                )}
+
+                <div>
                   <label className="label">الاسم الكامل</label>
                   <input className="input" value={fullName} onChange={(e) => setFullName(e.target.value)} required placeholder="أدخل اسمك الكامل" />
                 </div>
 
                 <div>
                   <label className="label">نوع الحساب</label>
-                  <select className="input" value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
-                    {availableRoles.map((r) => (
-                      <option key={r.value} value={r.value}>{r.label}</option>
-                    ))}
-                  </select>
-                  {role !== 'student' && role !== 'parent' && role !== 'super_admin' && (
+                  <Select value={role} onValueChange={(value) => { setRole(value as UserRole); trackMarketingEvent('signup_step', { step: 'role_selected', role: value }); }} options={availableRoles.map((r) => ({ value: r.value, label: r.label }))} ariaLabel="نوع الحساب" />
+                  {signupType === 'existing' && role !== 'student' && role !== 'parent' && role !== 'super_admin' && (
                     <p className="text-xs text-ink-400 mt-1.5">سيتم تفعيل حسابك من مدير المؤسسة بعد التسجيل</p>
                   )}
                 </div>
 
-                {role === 'super_admin' && isFirstUser && (
-                  <div>
-                    <label className="label">اسم المؤسسة الرئيسية</label>
-                    <input className="input" value={institutionName} onChange={(e) => setInstitutionName(e.target.value)} placeholder="اسم مؤسستك" />
-                  </div>
-                )}
-
-                {needsInstitution && !isFirstUser && (
+                {needsInstitution && (
                   <div>
                     <label className="label">المؤسسة</label>
-                    <select className="input" value={institutionId} onChange={(e) => setInstitutionId(e.target.value)} required>
+                    <Select value={institutionId} onValueChange={(value) => { setInstitutionId(value); trackMarketingEvent('signup_step', { step: 'institution_selected' }); }} options={institutions.map((inst) => ({ value: inst.id, label: inst.name }))} placeholder="اختر المؤسسة" ariaLabel="المؤسسة" required />
+                    {/*
                       <option value="">اختر المؤسسة</option>
-                      {institutions.map((inst) => (
-                        <option key={inst.id} value={inst.id}>{inst.name}</option>
-                      ))}
-                    </select>
-                  </div>
+                    */}
+                   </div>
                 )}
 
                 <div>
@@ -318,7 +366,7 @@ export function Auth() {
             </button>
           )}
           {(mode === 'reset-request' || mode === 'reset-password') && (
-            <button type="button" className="text-sm text-brand-600 hover:text-brand-700 mt-4 w-full" onClick={() => { setMode('login'); setError(null); setInfo(null); }}>
+            <button type="button" className="text-sm text-brand-600 hover:text-brand-700 mt-4 w-full" onClick={() => { if (isPasswordRecovery) void signOut(); setMode('login'); setError(null); setInfo(null); }}>
               العودة إلى تسجيل الدخول
             </button>
           )}

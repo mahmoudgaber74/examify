@@ -1,0 +1,51 @@
+name: Security and Logic Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Typecheck, lint, build, and security tests
+    runs-on: ubuntu-latest
+    env:
+      # Configure these as GitHub Actions secrets for authenticated staging tests.
+      SECURITY_TEST_SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
+      SECURITY_TEST_SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+      SECURITY_TEST_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.STAGING_SUPABASE_SERVICE_ROLE_KEY }}
+      SECURITY_TEST_USER_A_TOKEN: ${{ secrets.STAGING_SECURITY_USER_A_TOKEN }}
+      SECURITY_TEST_USER_B_TOKEN: ${{ secrets.STAGING_SECURITY_USER_B_TOKEN }}
+      SECURITY_TEST_INSTITUTION_B_ID: ${{ secrets.STAGING_SECURITY_INSTITUTION_B_ID }}
+      SECURITY_TEST_STUDENT_B_ID: ${{ secrets.STAGING_SECURITY_STUDENT_B_ID }}
+      SECURITY_TEST_EXAM_B_ID: ${{ secrets.STAGING_SECURITY_EXAM_B_ID }}
+      SECURITY_TEST_CERTIFICATE_B_ID: ${{ secrets.STAGING_SECURITY_CERTIFICATE_B_ID }}
+      REQUIRE_SECURITY_FIXTURES: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.13.0'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Production build
+        run: npm run build
+
+      - name: IDOR and authorization tests
+        run: npm run test:security

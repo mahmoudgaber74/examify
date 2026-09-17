@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { login, monitorPage, psqlScalar, state } from './helpers';
+import { confirmAction, login, monitorPage, psqlScalar, state } from './helpers';
 
 test.describe.serial('Question bank', () => {
   test.setTimeout(60_000);
@@ -180,8 +180,7 @@ test.describe.serial('Question bank', () => {
 
     await openQuestionBank(page);
     await createValidMcq(page, prompt, 'Delete correct', 'Delete wrong');
-    page.once('dialog', (dialog) => dialog.accept());
-    await page.getByTitle('حذف').first().click();
+    await confirmAction(page, () => page.getByTitle('حذف').first().click());
     await expect(page.getByText('لا توجد أسئلة مطابقة')).toBeVisible({ timeout: 20_000 });
     expect(Number(psqlScalar(`select count(*) from public.questions where prompt = '${prompt.replaceAll("'", "''")}';`))).toBe(0);
 

@@ -3,6 +3,7 @@ import { Plus, Search, Trash2, Edit3, Loader2, AlertCircle, Building2, Users, Gr
 import { Card, SectionHeader, Badge, EmptyState } from '../components/ui';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
 import { getArabicErrorMessage } from '../lib/translate';
+import { useFeedback } from '../components/FeedbackProvider';
 
 interface InstitutionRow {
   id: string;
@@ -43,6 +44,7 @@ const emptyCounts: Counts = { students: 0, teachers: 0, exams: 0, branches: 0 };
 
 export function Institutions() {
   const { role } = useAuthSafe();
+  const { confirm } = useFeedback();
   const isSuperAdmin = role === 'super_admin';
   const [institutions, setInstitutions] = useState<InstitutionRow[]>([]);
   const [branches, setBranches] = useState<BranchRow[]>([]);
@@ -133,7 +135,7 @@ export function Institutions() {
       return;
     }
 
-    if (!confirm('هل تريد حذف هذه المؤسسة الفارغة نهائيًا؟')) return;
+    if (!(await confirm('هل تريد حذف هذه المؤسسة الفارغة نهائيًا؟', { title: 'حذف المؤسسة', confirmLabel: 'حذف نهائي' }))) return;
     const { error: err } = await supabase.from('institutions').delete().eq('id', inst.id);
     if (err) { setError(getArabicErrorMessage(err)); return; }
     setInstitutions((prev) => prev.filter((i) => i.id !== inst.id));

@@ -76,6 +76,12 @@ const TYPE_LABELS: Record<string, string> = {
   ordering: ar.questionTypes.ordering,
 };
 
+const AUTO_GRADED_TYPES = new Set(['multiple_choice', 'true_false', 'fill_blank', 'matching', 'ordering']);
+
+function isManualAnswer(answer: AnswerRow) {
+  return !AUTO_GRADED_TYPES.has(answer.questions.type);
+}
+
 function statusMeta(status: string) {
   return STATUS_LABELS[status] ?? { label: status, tone: 'neutral' as const };
 }
@@ -92,7 +98,7 @@ function answerText(answer: AnswerRow) {
 }
 
 export function Grading() {
-  const { user, institutionId } = useAuthSafe();
+  const { user, role, institutionId } = useAuthSafe();
   const [attempts, setAttempts] = useState<AttemptRow[]>([]);
   const [selected, setSelected] = useState<AttemptRow | null>(null);
   const [answers, setAnswers] = useState<AnswerRow[]>([]);
@@ -103,6 +109,8 @@ export function Grading() {
   const [toast, setToast] = useState<string | null>(null);
   const [editingScore, setEditingScore] = useState(false);
   const [manualScore, setManualScore] = useState('');
+  const [manualGrades, setManualGrades] = useState<Record<string, { score: string; notes: string }>>({});
+  const [gradingAnswerId, setGradingAnswerId] = useState<string | null>(null);
 
   const fetchAttempts = useCallback(async () => {
     if (!institutionId) return;
@@ -206,14 +214,30 @@ export function Grading() {
 
   useEffect(() => { fetchAttempts(); }, [fetchAttempts]);
   useEffect(() => {
-    if (selected) {
-      setManualScore(selected.score != null ? String(selected.score) : '');
-      fetchAnswers(selected.id);
+    const selectedAttemptId = selected?.id;
+    if (selectedAttemptId) {
+      setManualScore(selected?.score != null ? String(selected.score) : '');
+      fetchAnswers(selectedAttemptId);
     } else {
       setAnswers([]);
       setManualScore('');
     }
-  }, [selected, fetchAnswers]);
+  }, [selected?.id, selected?.score, fetchAnswers]);
+
+  useEffect(() => {
+    setManualGrades((current) => {
+      const next = { ...current };
+      answers.filter(isManualAnswer).forEach((answer) => {
+        if (!next[answer.id]) {
+          next[answer.id] = {
+            score: answer.awarded_points == null ? '' : String(answer.awarded_points),
+            notes: answer.grader_notes ?? '',
+          };
+        }
+      });
+      return next;
+    });
+  }, [answers]);
 
   function showToast(message: string) {
     setToast(message);
@@ -230,22 +254,12 @@ export function Grading() {
       return;
     }
 
-    const percentage = totalPoints > 0 ? (score / totalPoints) * 100 : 0;
-    const passed = percentage >= Number(selected.examify_exams.passing_score);
-
     setActionLoading(true);
     setError(null);
-    const { error: updateError } = await supabase
-      .from('exam_attempts')
-      .update({
-        score,
-        score_percentage: percentage,
-        is_passed: passed,
-        status: 'graded',
-        graded_by: user.id,
-        graded_at: new Date().toISOString(),
-      })
-      .eq('id', selected.id);
+    const { error: updateError } = await supabase.rpc('record_manual_exam_grade', {
+      p_attempt_id: selected.id,
+      p_score: score,
+    });
 
     if (updateError) {
       console.error('Manual score save failed', updateError);
@@ -260,20 +274,48 @@ export function Grading() {
     setActionLoading(false);
   }
 
+  async function saveManualAnswer(answer: AnswerRow) {
+    if (!selected || !user || !isManualAnswer(answer)) return;
+    const draft = manualGrades[answer.id] ?? { score: '', notes: '' };
+    const score = Number(draft.score);
+    const maxPoints = Number(answer.questions.points);
+
+    if (!Number.isFinite(score) || score < 0 || score > maxPoints) {
+      setError(`${ar.grading.scoreRange} ${maxPoints}`);
+      return;
+    }
+
+    setActionLoading(true);
+    setGradingAnswerId(answer.id);
+    setError(null);
+    const { error: updateError } = await supabase.rpc('record_manual_answer_grade', {
+      p_answer_id: answer.id,
+      p_awarded_points: score,
+      p_grader_notes: draft.notes.trim() || null,
+    });
+
+    if (updateError) {
+      console.error('Manual answer grade save failed', updateError);
+      setError(getArabicErrorMessage(updateError));
+      setActionLoading(false);
+      setGradingAnswerId(null);
+      return;
+    }
+
+    showToast(ar.grading.scoreSaved);
+    await Promise.all([fetchAnswers(selected.id), fetchAttempts()]);
+    setActionLoading(false);
+    setGradingAnswerId(null);
+  }
+
   async function publishResult() {
     if (!selected || !user) return;
     setActionLoading(true);
     setError(null);
 
-    const { error: updateError } = await supabase
-      .from('exam_attempts')
-      .update({
-        status: 'approved',
-        is_result_published: true,
-        approved_by: user.id,
-        approved_at: new Date().toISOString(),
-      })
-      .eq('id', selected.id);
+    const { error: updateError } = await supabase.rpc('publish_exam_result', {
+      p_attempt_id: selected.id,
+    });
 
     if (updateError) {
       console.error('Result publish failed', updateError);
@@ -292,15 +334,10 @@ export function Grading() {
     setActionLoading(true);
     setError(null);
 
-    const { error: updateError } = await supabase
-      .from('exam_attempts')
-      .update({
-        status: 'graded',
-        is_result_published: false,
-        approved_by: null,
-        approved_at: null,
-      })
-      .eq('id', selected.id);
+    const { error: updateError } = await supabase.rpc('unpublish_exam_result', {
+      p_attempt_id: selected.id,
+      p_reason: 'Returned to teacher review',
+    });
 
     if (updateError) {
       console.error('Result return for review failed', updateError);
@@ -320,6 +357,16 @@ export function Grading() {
   const averageScore = attempts.length
     ? attempts.reduce((sum, attempt) => sum + (attempt.score_percentage ?? 0), 0) / attempts.length
     : 0;
+  const canGradeAnswers = ['super_admin', 'school_admin', 'teacher', 'grader'].includes(role);
+  const canUseAttemptOverride = role === 'super_admin' || role === 'school_admin';
+  const manualAnswers = answers.filter(isManualAnswer);
+  const objectiveAnswers = answers.filter((answer) => !isManualAnswer(answer));
+  const objectiveAwarded = objectiveAnswers.reduce((sum, answer) => sum + Number(answer.awarded_points ?? 0), 0);
+  const objectiveMaximum = objectiveAnswers.reduce((sum, answer) => sum + Number(answer.questions.points), 0);
+  const manualAwarded = manualAnswers.reduce((sum, answer) => sum + Number(answer.awarded_points ?? 0), 0);
+  const manualMaximum = manualAnswers.reduce((sum, answer) => sum + Number(answer.questions.points), 0);
+  const pendingManualCount = manualAnswers.filter((answer) => answer.awarded_points == null).length;
+  const calculatedScore = objectiveAwarded + manualAwarded;
 
   return (
     <div className="space-y-6">
@@ -411,7 +458,7 @@ export function Grading() {
                       </p>
                     </div>
                     <div className="text-left">
-                      {editingScore ? (
+                      {canUseAttemptOverride && editingScore ? (
                         <div className="flex items-center gap-2">
                           <input
                             data-testid="grading-score-input"
@@ -438,8 +485,15 @@ export function Grading() {
 
                   <ProgressBar value={selected.score_percentage ?? 0} tone={(selected.score_percentage ?? 0) >= selected.examify_exams.passing_score ? 'accent' : 'danger'} />
 
+                  <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-ink-600">
+                    <div className="rounded-lg bg-ink-50 p-2">الأسئلة الموضوعية: <strong className="nums-latin">{objectiveAwarded} / {objectiveMaximum}</strong></div>
+                    <div className="rounded-lg bg-ink-50 p-2">الأسئلة اليدوية: <strong className="nums-latin">{manualAwarded} / {manualMaximum}</strong></div>
+                    <div className="rounded-lg bg-ink-50 p-2">الإجمالي: <strong className="nums-latin">{calculatedScore} / {selected.examify_exams.total_points}</strong></div>
+                    <div className="rounded-lg bg-ink-50 p-2">قيد التصحيح: <strong className="nums-latin">{pendingManualCount}</strong></div>
+                  </div>
+
                   <div className="flex flex-wrap gap-2 mt-5">
-                    {editingScore ? (
+                    {canUseAttemptOverride && editingScore ? (
                       <>
                         <button data-testid="grading-save-score" onClick={saveManualScore} disabled={actionLoading} className="btn-primary disabled:opacity-60">
                           {actionLoading ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
@@ -449,8 +503,10 @@ export function Grading() {
                       </>
                     ) : (
                       <>
-                        <button data-testid="grading-edit-score" onClick={() => setEditingScore(true)} className="btn-outline"><Pencil size={16} /> {ar.grading.editScore}</button>
-                        <button data-testid="grading-publish-result" onClick={publishResult} disabled={actionLoading || selected.status !== 'graded'} className="btn-primary disabled:opacity-50">
+                        {canUseAttemptOverride && !selected.is_result_published && (
+                          <button data-testid="grading-edit-score" onClick={() => setEditingScore(true)} className="btn-outline"><Pencil size={16} /> تعديل الدرجة النهائية استثنائيًا</button>
+                        )}
+                        <button data-testid="grading-publish-result" onClick={publishResult} disabled={actionLoading || selected.status !== 'graded' || pendingManualCount > 0} className="btn-primary disabled:opacity-50">
                           {actionLoading ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
                           {ar.grading.approveAndPublish}
                         </button>
@@ -483,9 +539,21 @@ export function Grading() {
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2 mb-1">
                                 <Badge tone="neutral">{TYPE_LABELS[answer.questions.type] ?? answer.questions.type}</Badge>
-                                {answer.is_correct === true && <Badge tone="accent">{ar.grading.correct}</Badge>}
-                                {answer.is_correct === false && <Badge tone="danger">{ar.grading.incorrect}</Badge>}
-                                {answer.is_correct === null && <Badge tone="warning">{ar.grading.needsReview}</Badge>}
+                                {isManualAnswer(answer) ? (
+                                  answer.awarded_points === null ? (
+                                    <Badge tone="warning">{ar.grading.needsReview}</Badge>
+                                  ) : answer.awarded_points === answer.questions.points ? (
+                                    <Badge tone="accent">{ar.grading.correct}</Badge>
+                                  ) : answer.awarded_points === 0 ? (
+                                    <Badge tone="danger">{ar.grading.incorrect}</Badge>
+                                  ) : (
+                                    <Badge tone="warning">درجة جزئية</Badge>
+                                  )
+                                ) : (
+                                  answer.is_correct === true ? <Badge tone="accent">{ar.grading.correct}</Badge> :
+                                  answer.is_correct === false ? <Badge tone="danger">{ar.grading.incorrect}</Badge> :
+                                  <Badge tone="warning">{ar.grading.needsReview}</Badge>
+                                )}
                               </div>
                               <p className="text-sm text-ink-800 leading-relaxed">{answer.questions.prompt}</p>
                               <p className="text-sm text-ink-600 mt-2 whitespace-pre-wrap">{ar.grading.answer}: {answerText(answer)}</p>
@@ -493,6 +561,42 @@ export function Grading() {
                                 {ar.grading.awardedMarks}: {answer.awarded_points ?? 0} / {answer.questions.points}
                               </p>
                               {answer.grader_notes && <p className="text-xs text-ink-500 mt-1">{ar.grading.note}: {answer.grader_notes}</p>}
+                              {canGradeAnswers && isManualAnswer(answer) && !selected.is_result_published && ['submitted', 'auto_submitted', 'graded'].includes(selected.status) && (
+                                <div className="mt-3 rounded-lg border border-warning-200 bg-warning-50/50 p-3 space-y-2">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <label className="text-xs font-700 text-ink-700" htmlFor={`manual-score-${answer.id}`}>درجة السؤال</label>
+                                    <input
+                                      id={`manual-score-${answer.id}`}
+                                      data-testid={`manual-answer-score-${answer.id}`}
+                                      type="number"
+                                      min={0}
+                                      max={answer.questions.points}
+                                      value={manualGrades[answer.id]?.score ?? ''}
+                                      onChange={(event) => setManualGrades((current) => ({ ...current, [answer.id]: { ...(current[answer.id] ?? { notes: '' }), score: event.target.value } }))}
+                                      className="w-24 rounded-lg border border-ink-200 bg-white px-2 py-1 text-center nums-latin"
+                                    />
+                                    <span className="text-xs text-ink-500 nums-latin">/ {answer.questions.points}</span>
+                                  </div>
+                                  <textarea
+                                    aria-label="ملاحظات المصحح"
+                                    data-testid={`manual-answer-notes-${answer.id}`}
+                                    rows={2}
+                                    value={manualGrades[answer.id]?.notes ?? ''}
+                                    onChange={(event) => setManualGrades((current) => ({ ...current, [answer.id]: { ...(current[answer.id] ?? { score: '' }), notes: event.target.value } }))}
+                                    placeholder="ملاحظات المصحح (اختياري)"
+                                    className="w-full rounded-lg border border-ink-200 bg-white px-3 py-2 text-sm"
+                                  />
+                                  <button
+                                    data-testid={`manual-answer-save-${answer.id}`}
+                                    onClick={() => saveManualAnswer(answer)}
+                                    disabled={actionLoading}
+                                    className="btn-primary disabled:opacity-60"
+                                  >
+                                    {gradingAnswerId === answer.id ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+                                    حفظ درجة السؤال
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           </div>
                         </div>

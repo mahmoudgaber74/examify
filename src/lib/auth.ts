@@ -152,11 +152,3 @@ export async function getSession(): Promise<Session | null> {
 export async function getInstitutions() {
   return supabase.from('institutions').select('id, name').order('name');
 }
-
-export async function canBootstrapFirstAdmin() {
-  return supabase.rpc('can_bootstrap_first_admin');
-}
-
-export async function bootstrapFirstAdmin() {
-  return supabase.rpc('bootstrap_first_admin');
-}

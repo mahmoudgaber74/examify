@@ -17,7 +17,8 @@ export function state(): E2EState {
 }
 
 export function psqlScalar(sql: string) {
-  const output = execFileSync('docker', ['exec', '-i', 'supabase_db_project', 'psql', '-U', 'postgres', '-d', 'postgres', '-t', '-A', '-v', 'ON_ERROR_STOP=1'], {
+  const databaseContainer = process.env.SUPABASE_DB_CONTAINER ?? 'supabase_db_project';
+  const output = execFileSync('docker', ['exec', '-i', databaseContainer, 'psql', '-U', 'postgres', '-d', 'postgres', '-t', '-A', '-v', 'ON_ERROR_STOP=1'], {
     input: sql,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -27,7 +28,11 @@ export function psqlScalar(sql: string) {
 
 export async function login(page: Page, email: string, password: string) {
   await page.goto('/');
-  await page.locator('input[type="email"]').fill(email);
+  const emailInput = page.locator('input[type="email"]');
+  if (!(await emailInput.isVisible({ timeout: 3_000 }).catch(() => false))) {
+    await page.getByRole('button', { name: /تسجيل الدخول/ }).click();
+  }
+  await emailInput.fill(email);
   await page.locator('input[type="password"]').fill(password);
   await page.locator('button[type="submit"]').click();
   await expect(page.locator('main')).toBeVisible({ timeout: 20_000 });
@@ -35,7 +40,16 @@ export async function login(page: Page, email: string, password: string) {
 
 export async function logout(page: Page) {
   await page.getByTestId('auth-logout').first().click();
+  await expect(page.getByRole('button', { name: /تسجيل الدخول/ })).toBeVisible({ timeout: 10_000 });
+  await page.getByRole('button', { name: /تسجيل الدخول/ }).click();
   await expect(page.locator('input[type="email"]')).toBeVisible({ timeout: 10_000 });
+}
+
+export async function confirmAction(page: Page, action: () => Promise<void>, decision: 'confirm' | 'cancel' = 'confirm') {
+  await action();
+  const dialog = page.getByRole('alertdialog');
+  await expect(dialog).toBeVisible({ timeout: 5_000 });
+  await dialog.locator('.feedback-confirm-actions > button').nth(decision === 'confirm' ? 1 : 0).click();
 }
 
 export function monitorPage(page: Page, testInfo: TestInfo, allowedStatusUrls: RegExp[] = [], allowedConsoleMessages: RegExp[] = []) {
