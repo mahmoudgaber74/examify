@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { type Session, type User } from '@supabase/supabase-js';
 import { supabase, fetchUserProfile, type UserRole } from '../lib/auth';
+import { getClientDeviceId, getClientDeviceLabel } from '../lib/session-guard';
 
 const PASSWORD_RECOVERY_STORAGE_KEY = 'examify.password-recovery.confirmed';
 
@@ -58,6 +59,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let mounted = true;
 
+    const resetAuthState = () => {
+      setSession(null);
+      setUser(null);
+      setRole('anonymous');
+      setInstitutionId(null);
+      setFullName(null);
+      setIsActive(false);
+    };
+
+    const loadProfileAndClaimStudentSession = async (nextSession: Session | null) => {
+      if (!nextSession?.user) {
+        resetAuthState();
+        return;
+      }
+      const profile = await fetchUserProfile(nextSession.user);
+      if (!mounted) return;
+      if (profile.role === 'student') {
+        const { data, error } = await supabase.rpc('claim_student_session', {
+          p_device_id: getClientDeviceId(),
+          p_device_label: getClientDeviceLabel(),
+        });
+        if (error || !(data as { ok?: boolean } | null)?.ok) {
+          // Fail closed: a student session that cannot be registered must not
+          // continue to access exams as an untracked browser.
+          await supabase.auth.signOut({ scope: 'local' });
+          if (mounted) resetAuthState();
+          return;
+        }
+      }
+      setRole(profile.role);
+      setInstitutionId(profile.institutionId);
+      setFullName(profile.fullName);
+      setIsActive(profile.isActive);
+    };
+
     const { data: authListener } = supabase.auth.onAuthStateChange((event, newSession) => {
       (async () => {
         if (!mounted) return;
@@ -70,19 +106,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setConfirmedPasswordRecovery(false);
           setIsPasswordRecovery(false);
         }
-        if (newSession?.user) {
-          const profile = await fetchUserProfile(newSession.user);
-          if (!mounted) return;
-          setRole(profile.role);
-          setInstitutionId(profile.institutionId);
-          setFullName(profile.fullName);
-          setIsActive(profile.isActive);
-        } else {
-          setRole('anonymous');
-          setInstitutionId(null);
-          setFullName(null);
-          setIsActive(false);
-        }
+        await loadProfileAndClaimStudentSession(newSession);
+        if (!mounted) return;
         setLoading(false);
       })();
     });
@@ -94,18 +119,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const confirmedRecovery = Boolean(data.session && hasConfirmedPasswordRecovery());
       setIsPasswordRecovery(confirmedRecovery);
       if (!data.session) setConfirmedPasswordRecovery(false);
-      if (data.session?.user) {
-        fetchUserProfile(data.session.user).then((profile) => {
-          if (!mounted) return;
-          setRole(profile.role);
-          setInstitutionId(profile.institutionId);
-          setFullName(profile.fullName);
-          setIsActive(profile.isActive);
-          setLoading(false);
-        });
-      } else {
-        setLoading(false);
-      }
+      loadProfileAndClaimStudentSession(data.session).then(() => {
+        if (mounted) setLoading(false);
+      });
     });
 
     return () => {
@@ -114,8 +130,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!session || role !== 'student') return;
+    let mounted = true;
+    const heartbeat = async () => {
+      const { data, error } = await supabase.rpc('touch_student_session', {
+        p_device_id: getClientDeviceId(),
+      });
+      if (mounted && (error || data !== true)) {
+        await supabase.auth.signOut({ scope: 'local' });
+      }
+    };
+    const timer = window.setInterval(() => { void heartbeat(); }, 15000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, [session, role]);
+
   const handleSignOut = async () => {
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: 'local' });
     setSession(null);
     setUser(null);
     setRole('anonymous');

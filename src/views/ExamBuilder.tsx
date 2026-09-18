@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Plus, Search, Trash2, Edit3, Loader2, AlertCircle, Clock, Calendar, Send, X, Check, Zap, ArrowRight } from 'lucide-react';
+import { Plus, Search, Trash2, Edit3, Loader2, AlertCircle, Clock, Calendar, Send, X, Check, Zap, ArrowRight, Eye, ListChecks } from 'lucide-react';
 import { Card, SectionHeader, Badge, EmptyState } from '../components/ui';
 import { Select as DropdownSelect } from '../components/ui/Select';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
@@ -140,6 +140,7 @@ export function ExamBuilder() {
   const [filterStatus, setFilterStatus] = useState('all');
   const [showEditor, setShowEditor] = useState(false);
   const [showQuickExam, setShowQuickExam] = useState(false);
+  const [showBlueprint, setShowBlueprint] = useState(false);
   const [editing, setEditing] = useState<ExamRow | null>(null);
 
   const loadMeta = useCallback(async () => {
@@ -312,6 +313,18 @@ export function ExamBuilder() {
     );
   }
 
+  if (showBlueprint) {
+    return (
+      <ExamBlueprintBuilder
+        institutionId={institutionId}
+        subjects={activeSubjects}
+        classes={classes}
+        onClose={() => setShowBlueprint(false)}
+        onSaved={() => { setShowBlueprint(false); void loadExams(); }}
+      />
+    );
+  }
+
   return (
     <div className="space-y-5">
       <SectionHeader
@@ -320,7 +333,7 @@ export function ExamBuilder() {
       />
 
       {canEdit && (
-        <Card className="grid gap-3 p-3 sm:grid-cols-2 sm:p-4">
+        <Card className="grid gap-3 p-3 sm:grid-cols-3 sm:p-4">
           <button data-testid="exam-add" onClick={() => { setEditing(null); setShowEditor(true); }} className="group flex min-h-32 items-center gap-4 rounded-2xl border border-brand-100 bg-brand-50/60 p-5 text-right transition hover:border-brand-300 hover:bg-brand-50 hover:shadow-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
             <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-brand-600 text-white shadow-soft"><Plus size={21} /></span>
             <span className="min-w-0 flex-1">
@@ -335,6 +348,14 @@ export function ExamBuilder() {
               <span className="mb-1 block text-xs font-semibold text-ink-500">للاختبارات الورقية</span>
               <span className="block font-700 text-ink-900">{ar.examBuilder.quickExam}</span>
               <span className="mt-1 block text-sm leading-6 text-ink-500">{ar.examBuilder.quickExamDescription}</span>
+            </span>
+          </button>
+          <button data-testid="blueprint-exam-open" onClick={() => setShowBlueprint(true)} className="group flex min-h-32 items-center gap-4 rounded-2xl border border-brand-200 bg-brand-50/30 p-5 text-right transition hover:border-brand-400 hover:bg-brand-50 hover:shadow-soft focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
+            <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-brand-100 text-brand-700 shadow-soft"><ListChecks size={21} /></span>
+            <span className="min-w-0 flex-1">
+              <span className="mb-1 block text-xs font-semibold text-brand-700">بدون ذكاء اصطناعي</span>
+              <span className="block font-700 text-ink-900">مخطط امتحان متوازن</span>
+              <span className="mt-1 block text-sm leading-6 text-ink-500">وزّع الأسئلة حسب النوع والصعوبة ونواتج التعلم.</span>
             </span>
           </button>
         </Card>
@@ -1126,6 +1147,167 @@ function QuickExamModal({
           </div>
           <div className="rounded-xl bg-ink-50 p-3 text-xs leading-5 text-ink-500">سيتم إنشاء الاختبار كمسودة، ويمكنك مراجعته قبل نشره.</div>
         </aside>
+      </div>
+    </div>
+  );
+}
+
+type BlueprintBucket = {
+  type: string;
+  difficulty: string;
+  count: number;
+  learning_outcome_id: string;
+  unit: string;
+  lesson: string;
+};
+type BlueprintPreview = {
+  total_questions: number;
+  selected_count: number;
+  complete: boolean;
+  questions: { id: string; prompt: string; type: string; difficulty: string }[];
+  shortages: { bucket_index: number; requested: number; available: number; missing: number }[];
+};
+
+function ExamBlueprintBuilder({
+  institutionId,
+  subjects,
+  classes,
+  onClose,
+  onSaved,
+}: {
+  institutionId: string;
+  subjects: SubjectRow[];
+  classes: ClassRow[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [title, setTitle] = useState('اختبار من مخطط متوازن');
+  const [subjectId, setSubjectId] = useState(subjects[0]?.id ?? '');
+  const [classId, setClassId] = useState('');
+  const [totalQuestions, setTotalQuestions] = useState(20);
+  const [totalPoints, setTotalPoints] = useState(100);
+  const [passingScore, setPassingScore] = useState(50);
+  const [duration, setDuration] = useState(60);
+  const [seed, setSeed] = useState('examify');
+  const [allowPreviousReuse, setAllowPreviousReuse] = useState(false);
+  const [outcomes, setOutcomes] = useState<{ id: string; code: string; name_ar: string }[]>([]);
+  const [buckets, setBuckets] = useState<BlueprintBucket[]>([
+    { type: 'multiple_choice', difficulty: 'easy', count: 7, learning_outcome_id: '', unit: '', lesson: '' },
+    { type: 'multiple_choice', difficulty: 'medium', count: 9, learning_outcome_id: '', unit: '', lesson: '' },
+    { type: 'multiple_choice', difficulty: 'hard', count: 4, learning_outcome_id: '', unit: '', lesson: '' },
+  ]);
+  const [preview, setPreview] = useState<BlueprintPreview | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!subjectId) { setOutcomes([]); return; }
+    let active = true;
+    void supabase.rpc('get_learning_outcomes', { p_subject_id: subjectId, p_status: 'active' }).then(({ data, error: rpcError }) => {
+      if (!active) return;
+      if (rpcError) { setError(getArabicErrorMessage(rpcError)); return; }
+      setOutcomes(((data as { id: string; code: string; name_ar: string }[]) ?? []).map((item) => ({ id: item.id, code: item.code, name_ar: item.name_ar })));
+    });
+    return () => { active = false; };
+  }, [subjectId]);
+
+  const updateBucket = (index: number, patch: Partial<BlueprintBucket>) => {
+    setBuckets((current) => current.map((bucket, bucketIndex) => bucketIndex === index ? { ...bucket, ...patch } : bucket));
+    setPreview(null);
+  };
+  const addBucket = () => setBuckets((current) => [...current, { type: 'multiple_choice', difficulty: 'medium', count: 1, learning_outcome_id: '', unit: '', lesson: '' }]);
+  const removeBucket = (index: number) => setBuckets((current) => current.length > 1 ? current.filter((_, bucketIndex) => bucketIndex !== index) : current);
+  const requestPayload = () => ({
+    request_id: requestIdRef.current ?? crypto.randomUUID(),
+    institution_id: institutionId,
+    subject_id: subjectId,
+    class_id: classId || null,
+    title: title.trim(),
+    total_questions: totalQuestions,
+    total_points: totalPoints,
+    passing_score: passingScore,
+    duration_minutes: duration,
+    max_attempts: 1,
+    buckets: buckets.map((bucket) => ({ ...bucket, count: Number(bucket.count), learning_outcome_id: bucket.learning_outcome_id || null, unit: bucket.unit || null, lesson: bucket.lesson || null })),
+    allow_previous_reuse: allowPreviousReuse,
+    seed: seed.trim() || 'examify',
+  });
+
+  async function handlePreview() {
+    setError(null); setPreview(null);
+    const sum = buckets.reduce((total, bucket) => total + Number(bucket.count || 0), 0);
+    if (!subjectId || !title.trim()) { setError('اختر المادة واكتب عنوان الاختبار أولًا.'); return; }
+    if (sum !== totalQuestions) { setError(`مجموع توزيع الأسئلة (${sum}) يجب أن يساوي العدد المطلوب (${totalQuestions}).`); return; }
+    setLoading(true);
+    try {
+      const payload = requestPayload();
+      requestIdRef.current = payload.request_id;
+      const { data, error: rpcError } = await supabase.rpc('preview_exam_blueprint', { p_request: payload });
+      if (rpcError) throw rpcError;
+      setPreview(data as BlueprintPreview);
+    } catch (previewError) { setError(getArabicErrorMessage(previewError)); }
+    finally { setLoading(false); }
+  }
+
+  async function handleCreate() {
+    if (!preview?.complete) { setError('اعرض المعاينة وتأكد من اكتمال بنك الأسئلة قبل الإنشاء.'); return; }
+    setLoading(true); setError(null);
+    try {
+      const payload = requestPayload();
+      requestIdRef.current = payload.request_id;
+      const { data, error: rpcError } = await supabase.rpc('create_exam_from_blueprint', { p_request: payload });
+      if (rpcError) throw rpcError;
+      const result = data as { exam_id?: string; questions_count?: number } | null;
+      if (!result?.exam_id || result.questions_count !== totalQuestions) throw new Error('تعذر إنشاء الاختبار من المخطط.');
+      requestIdRef.current = null;
+      onSaved();
+    } catch (createError) { setError(getArabicErrorMessage(createError)); }
+    finally { setLoading(false); }
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <button type="button" onClick={onClose} className="btn-outline shrink-0"><ArrowRight size={16} /> العودة إلى الاختبارات</button>
+          <div className="hidden h-9 w-px bg-ink-200 sm:block" />
+          <div><h3 className="font-display text-xl font-700 text-ink-900">مخطط امتحان متوازن</h3><p className="mt-1 text-sm text-ink-500">اختيار حتمي من بنك الأسئلة بدون AI، مع معاينة قبل الإنشاء.</p></div>
+        </div>
+        <Badge tone="brand">قاعدة + Preview</Badge>
+      </div>
+      {error && <div className="flex items-center gap-2 rounded-xl border border-danger-200 bg-danger-50 p-3 text-sm text-danger-700"><AlertCircle size={18} /> {error}</div>}
+      <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
+        <Card className="space-y-5 p-5 sm:p-6">
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="space-y-1.5"><span className="label mb-0">عنوان الاختبار</span><input className="input" value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+            <label className="space-y-1.5"><span className="label mb-0">المادة</span><DropdownSelect value={subjectId} onValueChange={setSubjectId} options={subjects.map((subject) => ({ value: subject.id, label: subject.name }))} ariaLabel="اختيار المادة" testId="blueprint-subject" /></label>
+            <label className="space-y-1.5"><span className="label mb-0">الفصل (اختياري)</span><DropdownSelect value={classId} onValueChange={setClassId} options={[{ value: '', label: 'بدون تخصيص الآن' }, ...classes.map((item) => ({ value: item.id, label: `${item.name} - ${item.academic_year}` }))]} ariaLabel="اختيار الفصل" testId="blueprint-class" /></label>
+            <label className="space-y-1.5"><span className="label mb-0">Seed ثابت</span><input className="input nums-latin" value={seed} onChange={(event) => { setSeed(event.target.value); setPreview(null); }} /></label>
+          </div>
+          <div className="grid gap-4 md:grid-cols-4">
+            <label className="space-y-1.5"><span className="label mb-0">عدد الأسئلة</span><input type="number" min="1" max="200" className="input nums-latin" value={totalQuestions} onChange={(event) => { setTotalQuestions(Number(event.target.value)); setPreview(null); }} /></label>
+            <label className="space-y-1.5"><span className="label mb-0">الدرجة الكلية</span><input type="number" min="1" className="input nums-latin" value={totalPoints} onChange={(event) => setTotalPoints(Number(event.target.value))} /></label>
+            <label className="space-y-1.5"><span className="label mb-0">درجة النجاح %</span><input type="number" min="0" max="100" className="input nums-latin" value={passingScore} onChange={(event) => setPassingScore(Number(event.target.value))} /></label>
+            <label className="space-y-1.5"><span className="label mb-0">المدة بالدقائق</span><input type="number" min="1" className="input nums-latin" value={duration} onChange={(event) => setDuration(Number(event.target.value))} /></label>
+          </div>
+          <div className="flex items-center justify-between border-b border-ink-100 pb-3"><div><h4 className="font-700 text-ink-900">توزيع الأسئلة</h4><p className="mt-1 text-xs text-ink-500">حدد عددًا لكل نوع وصعوبة ونتيجة تعلم عند الحاجة.</p></div><button type="button" onClick={addBucket} className="btn-outline !py-2"><Plus size={15} /> إضافة توزيع</button></div>
+          <div className="space-y-3">
+            {buckets.map((bucket, index) => <div key={index} className="grid gap-3 rounded-xl border border-ink-100 bg-ink-50/60 p-3 md:grid-cols-[1.2fr_1fr_6rem_1.6fr_auto] md:items-end">
+              <label className="space-y-1"><span className="text-xs text-ink-500">النوع</span><select className="input !py-2" value={bucket.type} onChange={(event) => updateBucket(index, { type: event.target.value })}><option value="multiple_choice">اختيار من متعدد</option><option value="true_false">صح أو خطأ</option><option value="short_answer">إجابة قصيرة</option><option value="essay">مقالي</option><option value="numeric">رقمي</option><option value="matching">مطابقة</option><option value="ordering">ترتيب</option><option value="fill_blank">ملء فراغ</option></select></label>
+              <label className="space-y-1"><span className="text-xs text-ink-500">الصعوبة</span><select className="input !py-2" value={bucket.difficulty} onChange={(event) => updateBucket(index, { difficulty: event.target.value })}><option value="easy">سهل</option><option value="medium">متوسط</option><option value="hard">صعب</option></select></label>
+              <label className="space-y-1"><span className="text-xs text-ink-500">العدد</span><input type="number" min="1" className="input !py-2 nums-latin" value={bucket.count} onChange={(event) => updateBucket(index, { count: Number(event.target.value) })} /></label>
+              <label className="space-y-1"><span className="text-xs text-ink-500">ناتج تعلم اختياري</span><select className="input !py-2" value={bucket.learning_outcome_id} onChange={(event) => updateBucket(index, { learning_outcome_id: event.target.value })}><option value="">أي ناتج</option>{outcomes.map((outcome) => <option key={outcome.id} value={outcome.id}>{outcome.code} - {outcome.name_ar}</option>)}</select></label>
+              <button type="button" onClick={() => removeBucket(index)} disabled={buckets.length === 1} className="btn-ghost !p-2 text-danger-600 disabled:opacity-30" title="حذف التوزيع"><X size={17} /></button>
+            </div>)}
+          </div>
+          <label className="flex items-center gap-2 rounded-xl bg-warning-50 p-3 text-sm text-ink-700"><input type="checkbox" checked={allowPreviousReuse} onChange={(event) => { setAllowPreviousReuse(event.target.checked); setPreview(null); }} /> السماح بإعادة استخدام أسئلة ظهرت في اختبارات سابقة</label>
+          <div className="flex flex-col gap-3 sm:flex-row"><button type="button" onClick={handlePreview} disabled={loading} className="btn-outline flex-1"><Eye size={16} /> {loading ? 'جارٍ الفحص...' : 'معاينة التوزيع'}</button><button type="button" onClick={handleCreate} disabled={loading || !preview?.complete} className="btn-primary flex-1 disabled:opacity-50"><ListChecks size={16} /> إنشاء الاختبار</button></div>
+        </Card>
+        <Card className="h-fit space-y-4 p-5 xl:sticky xl:top-5">
+          <SectionHeader title="ملخص المعاينة" subtitle="لا يتم إنشاء أي بيانات قبل التأكيد." />
+          {!preview ? <EmptyState icon={<Eye size={32} />} title="لم تتم المعاينة بعد" subtitle="اضغط معاينة التوزيع لفحص توفر الأسئلة قبل الإنشاء." /> : <div className="space-y-3"><div className="grid grid-cols-2 gap-2"><div className="rounded-xl bg-ink-50 p-3"><span className="text-xs text-ink-500">المطلوب</span><strong className="mt-1 block text-xl nums-latin">{preview.total_questions}</strong></div><div className="rounded-xl bg-accent-50 p-3"><span className="text-xs text-ink-500">المتاح</span><strong className="mt-1 block text-xl text-accent-700 nums-latin">{preview.selected_count}</strong></div></div>{preview.shortages.length ? <div className="rounded-xl border border-warning-200 bg-warning-50 p-3 text-sm text-warning-800"><strong>لا يمكن الإنشاء بعد</strong><ul className="mt-2 list-disc space-y-1 pr-4">{preview.shortages.map((shortage) => <li key={shortage.bucket_index}>التوزيع {shortage.bucket_index}: ينقص {shortage.missing} سؤال</li>)}</ul></div> : <div className="rounded-xl border border-accent-200 bg-accent-50 p-3 text-sm text-accent-800">التوزيع مكتمل وجاهز للإنشاء الذري.</div>}<div className="max-h-72 space-y-2 overflow-y-auto">{preview.questions.map((question, index) => <div key={question.id} className="rounded-lg border border-ink-100 p-2 text-xs"><span className="font-700 nums-latin">#{index + 1}</span> {question.prompt}<span className="mt-1 block text-ink-400">{question.type} · {question.difficulty}</span></div>)}</div></div>}
+        </Card>
       </div>
     </div>
   );

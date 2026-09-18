@@ -33,6 +33,7 @@ interface BubbleSheetRow {
 interface OmrResultRow {
   id: string;
   exam_id: string;
+  bubble_sheet_id: string | null;
   student_profile_id: string | null;
   exam_attempt_id: string | null;
   student_name: string | null;
@@ -73,7 +74,8 @@ const OMR_BUCKET = 'exam-sheets';
 const OMR_ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'];
 const OMR_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const OMR_TEMPLATE_VERSION = 1;
-const OMR_RESULT_COLUMNS = 'id, exam_id, student_profile_id, exam_attempt_id, student_name, student_code, image_url, original_storage_path, processed_storage_path, image_mime_type, image_size_bytes, file_sha256, template_version, status, score, total_questions, correct_count, wrong_count, empty_count, confidence, processing_error, engine, engine_version, document_confidence, processing_time_ms, annotated_storage_path, warnings, needs_review, review_reason, resolved_by, created_at';
+const OMR_RESULT_COLUMNS = 'id, exam_id, bubble_sheet_id, student_profile_id, exam_attempt_id, student_name, student_code, image_url, original_storage_path, processed_storage_path, image_mime_type, image_size_bytes, file_sha256, template_version, status, score, total_questions, correct_count, wrong_count, empty_count, confidence, processing_error, engine, engine_version, document_confidence, processing_time_ms, annotated_storage_path, warnings, needs_review, review_reason, resolved_by, created_at';
+const OMR_OVERRIDE_LABELS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 
 function omrFileExtension(file: File) {
   if (file.type === 'image/png') return 'png';
@@ -220,7 +222,7 @@ export function BubbleSheet() {
 
       {tab === 'generate' && <GenerateTab exams={exams} onCreated={loadSheets} />}
       {tab === 'scan' && <ScanTab exams={exams} sheets={sheets} institutionId={institutionId ?? ''} userId={user?.id ?? ''} onScanned={loadOmrResults} />}
-      {tab === 'results' && <ResultsTab results={omrResults} exams={exams} students={students} onUpdated={loadOmrResults} />}
+      {tab === 'results' && <ResultsTab results={omrResults} exams={exams} students={students} sheets={sheets} onUpdated={loadOmrResults} />}
     </div>
   );
 }
@@ -1065,7 +1067,7 @@ function ScanTab({ exams, sheets, institutionId, userId, onScanned }: { exams: E
   );
 }
 
-function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResultRow[]; exams: ExamRow[]; students: StudentRow[]; onUpdated: () => void }) {
+function ResultsTab({ results, exams, students, sheets, onUpdated }: { results: OmrResultRow[]; exams: ExamRow[]; students: StudentRow[]; sheets: BubbleSheetRow[]; onUpdated: () => void }) {
   const { confirm, toast } = useFeedback();
   const [selected, setSelected] = useState<OmrResultRow | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -1215,6 +1217,8 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
   }
 
   if (selected) {
+    const selectedSheet = sheets.find((sheet) => sheet.id === selected.bubble_sheet_id);
+    const overrideLabels = OMR_OVERRIDE_LABELS.slice(0, Math.max(4, Math.min(selectedSheet?.choices_count ?? 4, OMR_OVERRIDE_LABELS.length)));
     return (
       <Card className="p-6">
         <div className="flex items-center justify-between mb-4">
@@ -1226,7 +1230,7 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
           </div>
         </div>
         {actionError && <div className="mb-4 flex items-center gap-2 p-3 rounded-xl bg-danger-50 border border-danger-200"><AlertCircle size={18} className="text-danger-600" /><p className="text-sm text-danger-700">{actionError}</p></div>}
-        {(selected.needs_review || answers.some((a) => a.needs_manual_review)) && <div className="mb-4 flex items-center gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-sm text-warning-800"><AlertCircle size={18} /><p>هذه الورقة تحتاج مراجعة بشرية{selected.review_reason ? `: ${selected.review_reason}` : ''}. اختر A أو B أو C أو D لكل سؤال معلّم.</p></div>}
+        {(selected.needs_review || answers.some((a) => a.needs_manual_review)) && <div className="mb-4 flex items-center gap-2 p-3 rounded-xl bg-warning-50 border border-warning-200 text-sm text-warning-800"><AlertCircle size={18} /><p>هذه الورقة تحتاج مراجعة بشرية{selected.review_reason ? `: ${selected.review_reason}` : ''}. اختر إجابة واحدة لكل سؤال معلّم.</p></div>}
         <div className="grid md:grid-cols-3 gap-3 mb-4">
           <div>
             <label className="label">الطالب</label>
@@ -1268,7 +1272,7 @@ function ResultsTab({ results, exams, students, onUpdated }: { results: OmrResul
                 {selected.status !== 'approved' && (
                   <select data-testid="omr-answer-override" className="input !py-1 !px-2 !w-auto text-xs mr-auto" defaultValue="" onChange={(e) => { if (e.target.value) overrideAnswer(a.id, e.target.value); }}>
                     <option value="">تعديل...</option>
-                    {['A', 'B', 'C', 'D'].map((o) => <option key={o} value={o}>{o}</option>)}
+                    {overrideLabels.map((o) => <option key={o} value={o}>{o}</option>)}
                     <option value="empty">فارغة</option>
                   </select>
                 )}

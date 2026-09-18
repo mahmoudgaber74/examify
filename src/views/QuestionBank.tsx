@@ -28,6 +28,7 @@ interface OptionRow {
 }
 
 interface SubjectRow { id: string; name: string; is_active: boolean; }
+interface LearningOutcomeOption { id: string; code: string; name_ar: string; unit: string | null; lesson: string | null; status: 'active' | 'archived'; }
 interface FillBlankRow { id: string; acceptedAnswers: string; caseSensitive: boolean; ignoreExtraSpaces: boolean; }
 interface MatchingPairRow { leftId: string; left: string; rightId: string; right: string; }
 interface OrderingItemRow { id: string; label: string; }
@@ -681,6 +682,9 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadingOptions, setLoadingOptions] = useState(false);
+  const [learningOutcomes, setLearningOutcomes] = useState<LearningOutcomeOption[]>([]);
+  const [learningOutcomeIds, setLearningOutcomeIds] = useState<string[]>([]);
+  const [loadingLearningOutcomes, setLoadingLearningOutcomes] = useState(false);
 
   useEffect(() => {
     if (!subjectId && subjects.length > 0) setSubjectId(subjects[0].id);
@@ -720,6 +724,30 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
         setLoadingOptions(false);
       });
   }, [editing]);
+
+  useEffect(() => {
+    let active = true;
+    if (!subjectId) {
+      setLearningOutcomes([]);
+      setLearningOutcomeIds([]);
+      return () => { active = false; };
+    }
+    setLoadingLearningOutcomes(true);
+    void supabase.rpc('get_learning_outcomes', { p_subject_id: subjectId, p_status: 'active' }).then(({ data, error: outcomeError }) => {
+      if (!active) return;
+      if (outcomeError) console.warn('Learning outcomes are unavailable until the Phase 1A migration is applied.', outcomeError);
+      setLearningOutcomes((data as LearningOutcomeOption[]) ?? []);
+      setLoadingLearningOutcomes(false);
+    });
+    if (!editing) {
+      setLearningOutcomeIds([]);
+      return () => { active = false; };
+    }
+    void supabase.from('question_learning_outcomes').select('learning_outcome_id').eq('question_id', editing.id).then(({ data }) => {
+      if (active) setLearningOutcomeIds(((data as { learning_outcome_id: string }[]) ?? []).map((row) => row.learning_outcome_id));
+    });
+    return () => { active = false; };
+  }, [editing, subjectId]);
 
   function addOption() {
     setOptions((prev) => [...prev, { id: '', label: '', is_correct: false, sort_order: prev.length }]);
@@ -819,6 +847,13 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
     if (advanced?.error) { setError(advanced.error); setSaving(false); return; }
 
     try {
+      const saveOutcomeLinks = async (questionId: string) => {
+        const { error: linkError } = await supabase.rpc('set_question_learning_outcomes', {
+          p_question_id: questionId,
+          p_learning_outcome_ids: learningOutcomeIds,
+        });
+        if (linkError) throw linkError;
+      };
       const questionData = {
         institution_id: institutionId,
         subject_id: subjectId || null,
@@ -833,7 +868,7 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
       };
 
       if (type === 'multiple_choice') {
-        const { error: rpcErr } = await supabase.rpc('save_multiple_choice_question', {
+        const { data: rpcData, error: rpcErr } = await supabase.rpc('save_multiple_choice_question', {
           p_question_id: editing?.id ?? null,
           p_institution_id: institutionId,
           p_subject_id: subjectId,
@@ -847,12 +882,14 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
           p_options: validatedOptions?.options ?? [],
         });
         if (rpcErr) throw rpcErr;
+        const questionId = (rpcData as { question_id?: string } | null)?.question_id ?? editing?.id;
+        if (questionId) await saveOutcomeLinks(questionId);
         onSaved();
         return;
       }
 
       if (ADVANCED_TYPES.includes(type)) {
-        const { error: rpcErr } = await supabase.rpc('save_advanced_question', {
+        const { data: rpcData, error: rpcErr } = await supabase.rpc('save_advanced_question', {
           p_question_id: editing?.id ?? null,
           p_institution_id: institutionId,
           p_subject_id: subjectId,
@@ -867,12 +904,14 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
           p_config: advanced?.config ?? {},
         });
         if (rpcErr) throw rpcErr;
+        const questionId = (rpcData as { question_id?: string } | null)?.question_id ?? editing?.id;
+        if (questionId) await saveOutcomeLinks(questionId);
         onSaved();
         return;
       }
 
       if (type === 'true_false') {
-        const { error: rpcErr } = await supabase.rpc('save_single_answer_question', {
+        const { data: rpcData, error: rpcErr } = await supabase.rpc('save_single_answer_question', {
           p_question_id: editing?.id ?? null,
           p_institution_id: institutionId,
           p_subject_id: subjectId,
@@ -890,6 +929,8 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
           ],
         });
         if (rpcErr) throw rpcErr;
+        const questionId = (rpcData as { question_id?: string } | null)?.question_id ?? editing?.id;
+        if (questionId) await saveOutcomeLinks(questionId);
         onSaved();
         return;
       }
@@ -906,6 +947,8 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
       }
 
       if (!questionId) throw new Error('Failed to save question.');
+
+      await saveOutcomeLinks(questionId);
 
       onSaved();
     } catch (e) {
@@ -976,6 +1019,27 @@ function QuestionEditor({ institutionId, subjects, editing, onClose, onSaved }: 
               <label className="label">{ar.questionBank.lesson}</label>
               <input className="input" value={lesson} onChange={(e) => setLesson(e.target.value)} />
             </div>
+          </div>
+
+          <div className="rounded-xl border border-brand-100 bg-brand-50/40 p-4" data-testid="question-learning-outcomes">
+            <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <label className="font-700 text-sm text-ink-900">نواتج التعلم <span className="font-normal text-ink-400">(اختياري)</span></label>
+                <p className="mt-1 text-xs leading-5 text-ink-500">اربط السؤال بمهارة أو أكثر من نفس المادة لظهورها في تحليلات الإتقان.</p>
+              </div>
+              {learningOutcomeIds.length > 0 && <Badge tone="brand">تم اختيار {learningOutcomeIds.length}</Badge>}
+            </div>
+            {loadingLearningOutcomes ? <div className="flex items-center gap-2 py-2 text-sm text-ink-500"><Loader2 size={16} className="animate-spin" /> جاري تحميل النواتج...</div> : learningOutcomes.length === 0 ? <p className="rounded-lg bg-white/70 px-3 py-2 text-sm text-ink-500">لا توجد نواتج نشطة لهذه المادة حاليًا. يمكنك حفظ السؤال بدون ربط.</p> : (
+              <div className="grid gap-2 md:grid-cols-2">
+                {learningOutcomes.map((outcome) => {
+                  const checked = learningOutcomeIds.includes(outcome.id);
+                  return <label key={outcome.id} className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2.5 transition ${checked ? 'border-brand-300 bg-white shadow-sm' : 'border-ink-100 bg-white/70 hover:border-brand-200'}`}>
+                    <input type="checkbox" checked={checked} onChange={() => setLearningOutcomeIds((current) => checked ? current.filter((id) => id !== outcome.id) : [...current, outcome.id])} className="mt-1 h-4 w-4 rounded border-ink-300 text-brand-600" />
+                    <span className="min-w-0"><span className="block text-sm font-700 text-ink-800"><span className="nums-latin text-brand-700">{outcome.code}</span> · {outcome.name_ar}</span>{(outcome.unit || outcome.lesson) && <span className="mt-0.5 block text-xs text-ink-400">{[outcome.unit, outcome.lesson].filter(Boolean).join(' · ')}</span>}</span>
+                  </label>;
+                })}
+              </div>
+            )}
           </div>
 
           {type === 'multiple_choice' && (

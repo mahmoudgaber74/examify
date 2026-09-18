@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Loader2, AlertCircle, TrendingUp, Award, Users, BarChart3, Download, FileSpreadsheet } from 'lucide-react';
-import { Card, SectionHeader, EmptyState, ProgressBar } from '../components/ui';
+import { Card, SectionHeader, EmptyState, ProgressBar, Badge } from '../components/ui';
 import { Select as DropdownSelect } from '../components/ui/Select';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
 import jsPDF from 'jspdf';
@@ -25,7 +25,29 @@ interface AttemptForReport {
   is_result_published: boolean;
   status: string;
   examify_exams: ReportExam;
-  student_profiles?: { full_name: string; student_code: string | null; phone: string | null } | null;
+  student_profiles?: { id: string; full_name: string; student_code: string | null; phone: string | null } | null;
+}
+
+interface OutcomeMasteryReport {
+  learning_outcome_id: string;
+  code: string;
+  name_ar: string;
+  question_count: number;
+  attempt_count: number;
+  answered_count: number;
+  mastery_percentage: number | null;
+  recommendation: string;
+  is_sufficient: boolean;
+}
+
+interface StudentLearningReport {
+  institution: { name: string; logo_url: string | null };
+  student: { id: string; full_name: string; student_code: string | null; phone: string | null };
+  exam: { id: string; title: string; subject_name: string | null; class_name: string | null; total_points: number; passing_score: number };
+  eligible_attempt_count: number;
+  attempts: { id: string; attempt_number: number; score: number | null; score_percentage: number | null; submitted_at: string | null }[];
+  mastery: OutcomeMasteryReport[];
+  questions: { question_id: string; question_number: number; prompt: string; unit: string | null; lesson: string | null; attempts_count: number; answered_count: number; correct_count: number; earned_points: number; possible_points: number }[];
 }
 
 interface ReportBranding {
@@ -89,6 +111,13 @@ export function Reports() {
   const [exams, setExams] = useState<ReportExam[]>([]);
   const [exporting, setExporting] = useState(false);
   const [reportAnswers, setReportAnswers] = useState<ReportExportAnswer[]>([]);
+  const [outcomeMastery, setOutcomeMastery] = useState<OutcomeMasteryReport[]>([]);
+  const [outcomeMasteryLoading, setOutcomeMasteryLoading] = useState(false);
+  const [outcomeMasteryError, setOutcomeMasteryError] = useState<string | null>(null);
+  const [studentReportId, setStudentReportId] = useState('');
+  const [studentReport, setStudentReport] = useState<StudentLearningReport | null>(null);
+  const [studentReportLoading, setStudentReportLoading] = useState(false);
+  const [studentReportError, setStudentReportError] = useState<string | null>(null);
   const [reportBranding, setReportBranding] = useState<ReportBranding>({ name: 'Examify', brandName: 'Examify', primaryColor: '#0D9488', logoUrl: null, address: '', phone: '' });
 
   const load = useCallback(async () => {
@@ -123,7 +152,7 @@ export function Reports() {
 
     let query = supabase
       .from('exam_attempts')
-      .select('id, submitted_at, score, score_percentage, is_passed, is_result_published, status, student_profiles(full_name, student_code, phone), examify_exams!inner(id, title, subject_id, total_points, passing_score, subjects(name))')
+      .select('id, submitted_at, score, score_percentage, is_passed, is_result_published, status, student_profiles(id, full_name, student_code, phone), examify_exams!inner(id, title, subject_id, total_points, passing_score, subjects(name))')
       .eq('examify_exams.institution_id', institutionId)
       .in('status', ['submitted', 'auto_submitted', 'graded', 'approved']);
 
@@ -211,6 +240,32 @@ export function Reports() {
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    if (filterExam === 'all') { setOutcomeMastery([]); setOutcomeMasteryError(null); return; }
+    let active = true;
+    setOutcomeMasteryLoading(true); setOutcomeMasteryError(null);
+    void supabase.rpc('get_learning_outcome_mastery', { p_exam_id: filterExam }).then(({ data, error: rpcError }) => {
+      if (!active) return;
+      if (rpcError) setOutcomeMasteryError(rpcError.message);
+      setOutcomeMastery((data as OutcomeMasteryReport[]) ?? []);
+      setOutcomeMasteryLoading(false);
+    });
+    return () => { active = false; };
+  }, [filterExam]);
+
+  useEffect(() => {
+    if (filterExam === 'all' || !studentReportId) { setStudentReport(null); setStudentReportError(null); return; }
+    let active = true;
+    setStudentReportLoading(true); setStudentReportError(null);
+    void supabase.rpc('get_student_learning_outcome_report', { p_exam_id: filterExam, p_student_id: studentReportId }).then(({ data, error: rpcError }) => {
+      if (!active) return;
+      if (rpcError) setStudentReportError(rpcError.message);
+      setStudentReport((data as StudentLearningReport) ?? null);
+      setStudentReportLoading(false);
+    });
+    return () => { active = false; };
+  }, [filterExam, studentReportId]);
+
   // Compute analytics
   const published = attempts.filter((a) => a.is_result_published || role !== 'student');
   const totalAttempts = published.length;
@@ -221,6 +276,8 @@ export function Reports() {
   const highest = totalAttempts > 0 ? Math.max(...published.map((a) => a.score_percentage ?? 0)) : 0;
   const lowest = totalAttempts > 0 ? Math.min(...published.map((a) => a.score_percentage ?? 0)) : 0;
   const subjects = Array.from(new Map(exams.filter((exam) => exam.subject_id).map((exam) => [exam.subject_id, exam.subjects?.name ?? 'بدون اسم'])).entries());
+
+  const reportStudents = Array.from(new Map(attempts.filter((attempt) => filterExam === 'all' || attempt.examify_exams.id === filterExam).map((attempt) => [attempt.student_profiles?.student_code ?? attempt.student_profiles?.full_name ?? attempt.id, { id: attempt.student_profiles?.id ?? attempt.id, name: attempt.student_profiles?.full_name ?? 'غير محدد', code: attempt.student_profiles?.student_code }])).values());
 
   // Per-exam breakdown
   const examStats = exams.map((exam) => {
@@ -247,6 +304,86 @@ export function Reports() {
     } finally {
       setExporting(false);
     }
+  }
+
+  async function exportStudentLearningPDF() {
+    if (!studentReport || studentReportLoading) return;
+    const studentReportSnapshot = studentReport;
+    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const logoData = await imageUrlToDataUrl(studentReport.institution.logo_url);
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const margin = 14;
+    const contentWidth = pageWidth - margin * 2;
+    const navy: readonly [number, number, number] = [20, 35, 70];
+    const teal: readonly [number, number, number] = hexToRgb(reportBranding.primaryColor);
+    const ink: readonly [number, number, number] = [31, 41, 55];
+    const muted: readonly [number, number, number] = [100, 116, 139];
+    const line: readonly [number, number, number] = [226, 232, 240];
+    const pale: readonly [number, number, number] = [248, 250, 252];
+    let pageNumber = 1;
+    let y = 0;
+
+    function drawArabicText(text: string, rightX: number, baselineY: number, fontSize: number, color: readonly [number, number, number], bold = false, maxWidth = contentWidth) {
+      const scale = 4;
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      context.font = `${bold ? '700' : '400'} ${fontSize * scale}px Arial, sans-serif`;
+      const measuredWidth = Math.ceil(context.measureText(text).width) + 8 * scale;
+      const canvasWidth = Math.max(24, Math.min(Math.ceil(maxWidth * scale), measuredWidth));
+      canvas.width = canvasWidth; canvas.height = Math.ceil((fontSize + 5) * scale);
+      context.font = `${bold ? '700' : '400'} ${fontSize * scale}px Arial, sans-serif`;
+      context.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+      context.direction = 'rtl'; context.textAlign = 'right'; context.textBaseline = 'alphabetic';
+      context.fillText(text, canvasWidth - 4 * scale, fontSize * scale, canvasWidth - 8 * scale);
+      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', rightX - canvasWidth / scale, baselineY - fontSize + 1, canvasWidth / scale, (fontSize + 5) / scale);
+    }
+
+    function drawHeader() {
+      pdf.setFillColor(...navy); pdf.rect(0, 0, pageWidth, 32, 'F');
+      if (logoData && !logoData.startsWith('data:image/svg+xml')) pdf.addImage(logoData, logoData.startsWith('data:image/jpeg') ? 'JPEG' : 'PNG', margin, 6, 16, 16);
+      pdf.setFillColor(...teal); pdf.rect(0, 29, pageWidth, 3, 'F');
+      drawArabicText('تقرير إتقان نواتج التعلم', pageWidth - margin, 17, 15, [255, 255, 255], true);
+      drawArabicText(`${studentReportSnapshot.institution.name} · ${studentReportSnapshot.exam.title}`, pageWidth - margin, 25, 8.5, [255, 255, 255]);
+      pdf.setTextColor(...muted); pdf.setFont('helvetica', 'normal'); pdf.setFontSize(8); pdf.text(String(pageNumber), margin, pageHeight - 8);
+      drawArabicText(studentReportSnapshot.institution.name, pageWidth - margin, pageHeight - 8, 8, muted);
+    }
+    function newPage() { pdf.addPage(); pageNumber += 1; drawHeader(); y = 40; }
+    function ensureSpace(height: number) { if (y + height > pageHeight - 17) newPage(); }
+
+    drawHeader(); y = 42;
+    pdf.setDrawColor(...line); pdf.setFillColor(...pale); pdf.roundedRect(margin, y, contentWidth, 34, 3, 3, 'FD');
+    drawArabicText('الطالب', pageWidth - margin - 8, y + 9, 8, muted, false, 38);
+    drawArabicText(studentReport.student.full_name, pageWidth - margin - 8, y + 19, 12, ink, true, 72);
+    drawArabicText(studentReport.student.student_code ? `كود الطالب: ${studentReport.student.student_code}` : 'كود الطالب: —', pageWidth - margin - 8, y + 28, 8, muted, false, 72);
+    drawArabicText('الامتحان', pageWidth - margin - 92, y + 9, 8, muted, false, 48);
+    drawArabicText(studentReport.exam.title, pageWidth - margin - 92, y + 19, 10, ink, true, 70);
+    drawArabicText(`${studentReport.exam.subject_name ?? 'بدون مادة'} · ${studentReport.exam.class_name ?? 'بدون فصل'}`, pageWidth - margin - 92, y + 28, 8, muted, false, 70);
+    y += 43;
+    drawArabicText(`المحاولات المعتمدة: ${studentReport.eligible_attempt_count}`, pageWidth - margin, y, 9, ink, true);
+    y += 9;
+    drawArabicText('إتقان نواتج التعلم', pageWidth - margin, y, 12, navy, true); y += 8;
+    for (const outcome of studentReport.mastery) {
+      ensureSpace(22);
+      pdf.setDrawColor(...line); pdf.setFillColor(...pale); pdf.roundedRect(margin, y, contentWidth, 19, 2, 2, 'FD');
+      drawArabicText(`${outcome.code} · ${outcome.name_ar}`, pageWidth - margin - 5, y + 7, 9, ink, true, contentWidth - 45);
+      drawArabicText(outcome.is_sufficient ? outcome.recommendation : 'بيانات غير كافية', pageWidth - margin - 5, y + 14, 7.5, muted, false, contentWidth - 45);
+      pdf.setTextColor(...teal); pdf.setFont('helvetica', 'bold'); pdf.setFontSize(10); pdf.text(outcome.mastery_percentage === null ? '—' : `${Number(outcome.mastery_percentage).toFixed(1)}%`, margin + 9, y + 10);
+      y += 23;
+    }
+    if (!studentReport.mastery.length) { drawArabicText('لا توجد نواتج تعلم مرتبطة بالامتحان.', pageWidth - margin, y + 7, 9, muted); y += 20; }
+    y += 3; drawArabicText('الأسئلة الداخلة في الحساب', pageWidth - margin, y, 12, navy, true); y += 8;
+    for (const question of studentReport.questions) {
+      ensureSpace(23);
+      pdf.setDrawColor(...line); pdf.setFillColor(255, 255, 255); pdf.roundedRect(margin, y, contentWidth, 20, 2, 2, 'FD');
+      drawArabicText(`#${question.question_number} · ${question.prompt}`, pageWidth - margin - 5, y + 8, 8.5, ink, false, contentWidth - 45);
+      drawArabicText(`${question.unit ?? ''}${question.lesson ? ` · ${question.lesson}` : ''}`, pageWidth - margin - 5, y + 15, 7, muted, false, contentWidth - 45);
+      pdf.setTextColor(...ink); pdf.setFont('helvetica', 'normal'); pdf.setFontSize(7.5); pdf.text(`${question.correct_count}/${question.answered_count || 0}`, margin + 8, y + 9);
+      y += 24;
+    }
+    if (!studentReport.questions.length) drawArabicText('لا توجد أسئلة معتمدة في الحساب.', pageWidth - margin, y + 7, 9, muted);
+    pdf.save(`examify-student-learning-${studentReport.student.student_code ?? studentReport.student.id}-${new Date().toISOString().slice(0, 10)}.pdf`);
   }
 
   async function exportPDF() {
@@ -843,6 +980,17 @@ export function Reports() {
         </div>
       </Card>
 
+      {filterExam !== 'all' && <Card className="space-y-4 p-5" data-testid="student-learning-report">
+        <SectionHeader title="تقرير طالب مستقل" subtitle="يعرض فقط بيانات الطالب المسموح بها والنتائج المنشورة والمعتمدة." />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <label className="w-full space-y-1.5 sm:max-w-md"><span className="label mb-0">اختيار الطالب</span><DropdownSelect testId="student-report-select" value={studentReportId} onValueChange={setStudentReportId} ariaLabel="اختيار الطالب للتقرير" options={[{ value: '', label: 'اختر طالبًا' }, ...reportStudents.map((student) => ({ value: student.id, label: student.code ? `${student.name} — ${student.code}` : student.name }))]} /></label>
+          <button type="button" data-testid="student-report-export-pdf" onClick={() => void exportStudentLearningPDF()} disabled={!studentReport || studentReportLoading} className="btn-primary disabled:opacity-40"><Download size={16} /> تنزيل تقرير الطالب PDF</button>
+        </div>
+        {studentReportError && <p className="text-sm text-danger-700">تعذر تحميل تقرير الطالب: {studentReportError}</p>}
+        {studentReportLoading && <div className="flex justify-center py-6"><Loader2 size={22} className="animate-spin text-brand-600" /></div>}
+        {studentReport && !studentReportLoading && <div className="space-y-4 rounded-2xl border border-ink-100 bg-ink-50/60 p-4"><div className="grid gap-3 sm:grid-cols-3"><div><span className="text-xs text-ink-500">الطالب</span><strong className="mt-1 block">{studentReport.student.full_name}</strong></div><div><span className="text-xs text-ink-500">الامتحان</span><strong className="mt-1 block">{studentReport.exam.title}</strong></div><div><span className="text-xs text-ink-500">المحاولات المعتمدة</span><strong className="mt-1 block nums-latin">{studentReport.eligible_attempt_count}</strong></div></div><div className="grid gap-3 md:grid-cols-2">{studentReport.mastery.map((outcome) => <div key={outcome.learning_outcome_id} className="rounded-xl border border-ink-100 bg-white p-3"><div className="flex items-center justify-between gap-2"><span className="font-700">{outcome.code} · {outcome.name_ar}</span><Badge tone={outcome.is_sufficient ? 'accent' : 'neutral'}>{outcome.mastery_percentage === null ? 'بيانات غير كافية' : `${Number(outcome.mastery_percentage).toFixed(1)}%`}</Badge></div><ProgressBar value={outcome.mastery_percentage ?? 0} tone="brand" className="mt-2" /><p className="mt-2 text-xs text-ink-500">{outcome.is_sufficient ? outcome.recommendation : 'يلزم عدد أكبر من المحاولات لبناء استنتاج موثوق.'}</p></div>)}</div><p className="text-xs text-ink-500">تم بناء التقرير من {studentReport.questions.length} سؤالًا معتمدًا في الحساب، ولا يشمل المحاولات غير المنشورة أو التي تحتاج مراجعة.</p></div>}
+      </Card>}
+
       {totalAttempts === 0 ? (
         <Card><EmptyState icon={<BarChart3 size={40} />} title={ar.reports.noData} subtitle={ar.reports.noDataSubtitle} /></Card>
       ) : (
@@ -892,6 +1040,13 @@ export function Reports() {
               ))}
             </div>
           </Card>
+
+          {filterExam !== 'all' && <Card className="p-5" data-testid="reports-learning-outcomes">
+            <SectionHeader title="تقرير إتقان نواتج التعلم" subtitle="ملخص الفصل/الامتحان من النتائج المنشورة والمعتمدة فقط." />
+            {outcomeMasteryError && <p className="text-sm text-danger-700">تعذر تحميل التقرير: {outcomeMasteryError}</p>}
+            {outcomeMasteryLoading && <div className="flex justify-center py-6"><Loader2 size={22} className="animate-spin text-brand-600" /></div>}
+            {!outcomeMasteryLoading && !outcomeMasteryError && (outcomeMastery.length ? <div className="grid gap-3 md:grid-cols-2">{outcomeMastery.map((outcome) => <div key={outcome.learning_outcome_id} className="rounded-xl border border-ink-100 bg-ink-50 p-4"><div className="flex items-start justify-between gap-3"><div><div className="flex items-center gap-2"><Badge tone="brand">{outcome.code}</Badge><strong>{outcome.name_ar}</strong></div><p className="mt-2 text-xs text-ink-500">{outcome.question_count} أسئلة · {outcome.attempt_count} محاولات · {outcome.answered_count} إجابة محسوبة</p></div><Badge tone={outcome.is_sufficient ? (outcome.mastery_percentage ?? 0) >= 70 ? 'accent' : (outcome.mastery_percentage ?? 0) < 50 ? 'danger' : 'warning' : 'neutral'}>{outcome.is_sufficient ? outcome.recommendation : 'بيانات غير كافية'}</Badge></div><div className="mt-3 flex items-center gap-3"><ProgressBar value={outcome.mastery_percentage ?? 0} tone="brand" className="flex-1" /><strong className="nums-latin">{outcome.mastery_percentage === null ? '—' : `${Number(outcome.mastery_percentage).toFixed(1)}%`}</strong></div></div>)}</div> : <EmptyState title="لا توجد نواتج مرتبطة" subtitle="اربط الأسئلة بنواتج تعلم وانشر النتائج المعتمدة لظهور التقرير." />)}
+          </Card>}
         </>
       )}
     </div>

@@ -34,6 +34,7 @@ const ExamRunner = lazy(() => import('./views/ExamRunner').then(({ ExamRunner })
 const ExamResults = lazy(() => import('./views/ExamResults').then(({ ExamResults }) => ({ default: ExamResults })));
 const Institutions = lazy(() => import('./views/Institutions').then(({ Institutions }) => ({ default: Institutions })));
 const AcademicSetup = lazy(() => import('./views/AcademicSetup').then(({ AcademicSetup }) => ({ default: AcademicSetup })));
+const LearningOutcomes = lazy(() => import('./views/LearningOutcomes').then(({ LearningOutcomes }) => ({ default: LearningOutcomes })));
 const BubbleSheet = lazy(() => import('./views/BubbleSheet').then(({ BubbleSheet }) => ({ default: BubbleSheet })));
 const OmrOperations = lazy(() => import('./views/OmrOperations').then(({ OmrOperations }) => ({ default: OmrOperations })));
 const Reports = lazy(() => import('./views/Reports').then(({ Reports }) => ({ default: Reports })));
@@ -59,6 +60,7 @@ const SUBTITLES: Record<ViewId, string> = {
   examresults: 'النتائج — متابعة الدرجات والتحليل',
   institutions: 'إدارة المؤسسات والمدارس',
   academicsetup: 'إدارة الأعوام والمراحل والصفوف والفصول والمواد وتوزيع المعلمين',
+  learningoutcomes: 'إدارة نواتج التعلم وربطها ببنك الأسئلة',
   bubblesheet: 'إنشاء ومسح وتصحيح أوراق البابل شيت',
   omrops: 'مراقبة طوابير ومحاولات معالجة OMR',
   reports: 'تقارير وتحليلات محسوبة من بيانات الامتحانات',
@@ -66,9 +68,9 @@ const SUBTITLES: Record<ViewId, string> = {
 };
 
 const ROLE_VIEWS: Record<string, ViewId[]> = {
-  super_admin: ['dashboard', 'institutions', 'academicsetup', 'analytics', 'sis', 'assessment', 'questionbank', 'exambuilder', 'bubblesheet', 'omrops', 'aiengine', 'grading', 'examresults', 'reports', 'settings'],
-  school_admin: ['dashboard', 'academicsetup', 'sis', 'assessment', 'questionbank', 'exambuilder', 'bubblesheet', 'omrops', 'aiengine', 'grading', 'examresults', 'reports', 'analytics', 'parents', 'settings'],
-  teacher: ['dashboard', 'questionbank', 'exambuilder', 'bubblesheet', 'omrops', 'aiengine', 'grading', 'examresults', 'reports', 'sis'],
+  super_admin: ['dashboard', 'institutions', 'academicsetup', 'learningoutcomes', 'analytics', 'sis', 'assessment', 'questionbank', 'exambuilder', 'bubblesheet', 'omrops', 'aiengine', 'grading', 'examresults', 'reports', 'settings'],
+  school_admin: ['dashboard', 'academicsetup', 'learningoutcomes', 'sis', 'assessment', 'questionbank', 'exambuilder', 'bubblesheet', 'omrops', 'aiengine', 'grading', 'examresults', 'reports', 'analytics', 'parents', 'settings'],
+  teacher: ['dashboard', 'learningoutcomes', 'questionbank', 'exambuilder', 'bubblesheet', 'omrops', 'aiengine', 'grading', 'examresults', 'reports', 'sis'],
   grader: ['dashboard', 'bubblesheet', 'omrops', 'aiengine', 'grading', 'examresults', 'reports'],
   data_entry: ['dashboard', 'sis'],
   student: ['dashboard', 'examrunner', 'examresults'],
@@ -212,6 +214,7 @@ function AppContent() {
             {safeView === 'aiengine' && <AiEngine />}
             {safeView === 'institutions' && <Institutions />}
             {safeView === 'academicsetup' && <AcademicSetup />}
+            {safeView === 'learningoutcomes' && <LearningOutcomes />}
             </Suspense>
           </div>
         </main>

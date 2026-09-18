@@ -4,6 +4,7 @@ import '@tensorflow/tfjs';
 import * as blazeface from '@tensorflow-models/blazeface';
 import { Card, SectionHeader, Badge, EmptyState } from '../components/ui';
 import { supabase, useAuthSafe } from '../lib/auth-helpers';
+import { getClientDeviceId, getClientDeviceLabel } from '../lib/session-guard';
 
 interface ExamSummary {
   id: string;
@@ -172,6 +173,7 @@ export function ExamRunner() {
   const [result, setResult] = useState<SubmitAttemptResult | null>(null);
   const [strikeCount, setStrikeCount] = useState(0);
   const [activeViolation, setActiveViolation] = useState<{ type: string; description: string } | null>(null);
+  const [examDeviceBlocked, setExamDeviceBlocked] = useState(false);
   const [cameraStatus, setCameraStatus] = useState<'inactive' | 'starting' | 'active' | 'unavailable'>('inactive');
   const [attempts, setAttempts] = useState<Record<string, AttemptRow[]>>({});
   const [attemptSummaries, setAttemptSummaries] = useState<Record<string, AttemptSummary>>({});
@@ -386,6 +388,47 @@ export function ExamRunner() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [activeAttempt, activeExam, questions.length]);
 
+  // The account session guard prevents ordinary multi-login use. This second
+  // heartbeat protects an active attempt if a token/device is copied while the
+  // first browser is still answering.
+  useEffect(() => {
+    if (!activeAttempt) {
+      setExamDeviceBlocked(false);
+      return;
+    }
+    let mounted = true;
+    const deviceId = getClientDeviceId();
+    const deviceLabel = getClientDeviceLabel();
+    const claim = async () => {
+      const { data, error } = await supabase.rpc('claim_student_exam_device', {
+        p_attempt_id: activeAttempt.id,
+        p_device_id: deviceId,
+        p_device_label: deviceLabel,
+      });
+      const allowed = !error && (data as { allowed?: boolean } | null)?.allowed === true;
+      if (mounted && !allowed) {
+        setExamDeviceBlocked(true);
+        setExamLocked(true);
+        setError('تم اكتشاف جهاز آخر يستخدم محاولة الامتحان. تم إيقاف الإجابة على هذا الجهاز حفاظًا على نزاهة الامتحان.');
+      }
+    };
+    const heartbeat = async () => {
+      if (!navigator.onLine) return;
+      const { data, error } = await supabase.rpc('touch_student_exam_device', {
+        p_attempt_id: activeAttempt.id,
+        p_device_id: deviceId,
+      });
+      if (mounted && (error || data !== true)) {
+        setExamDeviceBlocked(true);
+        setExamLocked(true);
+        setError('انتهت صلاحية جهاز الامتحان الحالي أو تم فتح المحاولة من جهاز آخر.');
+      }
+    };
+    void claim();
+    const timer = window.setInterval(() => { void heartbeat(); }, 10000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, [activeAttempt?.id]);
+
   // Auto-save answers
   useEffect(() => {
     if (!activeAttempt) return;
@@ -474,7 +517,7 @@ export function ExamRunner() {
   }
 
   function setAnswer(questionId: string, field: 'optionId' | 'text' | 'numeric', value: string) {
-    if (submissionStartedRef.current) return;
+    if (submissionStartedRef.current || examDeviceBlocked) return;
     const nextAnswer = { ...answers[questionId], [field]: value };
     const nextAnswers = { ...answers, [questionId]: nextAnswer };
     setAnswers(nextAnswers);
@@ -483,7 +526,7 @@ export function ExamRunner() {
   }
 
   function setAnswerPayload(questionId: string, payload: Record<string, unknown>) {
-    if (submissionStartedRef.current) return;
+    if (submissionStartedRef.current || examDeviceBlocked) return;
     const nextAnswer = { ...answers[questionId], payload };
     const nextAnswers = { ...answers, [questionId]: nextAnswer };
     setAnswers(nextAnswers);
@@ -633,7 +676,7 @@ export function ExamRunner() {
 
   async function handleSubmit(auto: boolean) {
     if (!activeAttempt || !activeExam) return;
-    if (submissionStartedRef.current) return;
+    if (submissionStartedRef.current || examDeviceBlocked) return;
     const firstMissing = questions.findIndex((question) => ['fill_blank', 'matching', 'ordering'].includes(question.questions.type) && !isQuestionAnswered(question));
     if (!auto && firstMissing >= 0) {
       setCurrentQ(firstMissing);
@@ -849,6 +892,11 @@ export function ExamRunner() {
           <div data-testid="exam-runner-error" className="flex items-center gap-2 p-3 rounded-xl bg-danger-50 border border-danger-200">
             <AlertCircle size={18} className="text-danger-600" />
             <p className="text-sm text-danger-700">{error}</p>
+          </div>
+        )}
+        {examDeviceBlocked && (
+          <div role="alert" className="rounded-xl border border-danger-300 bg-danger-50 p-4 text-sm font-700 text-danger-800">
+            هذه المحاولة مرتبطة بجهاز آخر حاليًا. لا يمكن متابعة الإجابة من أكثر من جهاز في نفس الوقت.
           </div>
         )}
         {!isOnline && <div className="rounded-xl border border-warning-200 bg-warning-50 p-3 text-sm text-warning-800">Offline Mode — Answers saved locally.</div>}

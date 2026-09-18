@@ -22,6 +22,7 @@ import {
   Activity,
   Cpu,
   Layers3,
+  Target,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -45,6 +46,7 @@ export type ViewId =
   | 'examresults'
   | 'institutions'
   | 'academicsetup'
+  | 'learningoutcomes'
   | 'bubblesheet'
   | 'omrops'
   | 'reports'
@@ -81,6 +83,7 @@ export const NAV_ITEMS: NavItem[] = [
   { id: 'parents', label: 'بوابة أولياء الأمور', icon: Heart, group: 'العمليات' },
   { id: 'institutions', label: 'إدارة المؤسسات', icon: Building2, group: 'الإدارة' },
   { id: 'academicsetup', label: 'الإعداد الأكاديمي', icon: Layers3, group: 'الإدارة' },
+  { id: 'learningoutcomes', label: 'نواتج التعلم', icon: Target, group: 'الإدارة' },
   { id: 'settings', label: 'المؤسسة', icon: Settings, group: 'الإدارة' },
 ];
 

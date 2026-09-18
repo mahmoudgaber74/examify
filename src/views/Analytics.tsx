@@ -16,6 +16,7 @@ type ClassRow = { id: string; name: string; branch_id: string | null };
 type Branch = { id: string; name: string };
 type AnalyticsData = { students: Student[]; subjects: Subject[]; exams: Exam[]; attempts: Attempt[]; attendance: Attendance[]; grades: Grade[]; classStudents: ClassStudent[]; classes: ClassRow[]; branches: Branch[] };
 type ItemAnalysis = { question_id: string; question_number: number; prompt: string; attempts_count: number; answered_count: number; correct_count: number; success_rate: number | null; is_difficult: boolean };
+type OutcomeMastery = { learning_outcome_id: string; code: string; name_ar: string; subject_id: string; question_count: number; attempt_count: number; answered_count: number; earned_points: number; possible_points: number; mastery_percentage: number | null; classification: 'insufficient_data' | 'needs_review' | 'developing' | 'good'; recommendation: string; is_sufficient: boolean };
 
 const EMPTY: AnalyticsData = { students: [], subjects: [], exams: [], attempts: [], attendance: [], grades: [], classStudents: [], classes: [], branches: [] };
 const ranges = [{ value: '30', label: '30 يوم' }, { value: '90', label: '90 يوم' }, { value: '365', label: 'سنة' }, { value: 'all', label: 'الكل' }];
@@ -34,6 +35,9 @@ export function Analytics() {
   const [itemAnalysis, setItemAnalysis] = useState<ItemAnalysis[]>([]);
   const [itemAnalysisLoading, setItemAnalysisLoading] = useState(false);
   const [itemAnalysisError, setItemAnalysisError] = useState<string | null>(null);
+  const [mastery, setMastery] = useState<OutcomeMastery[]>([]);
+  const [masteryLoading, setMasteryLoading] = useState(false);
+  const [masteryError, setMasteryError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!institutionId) return;
@@ -64,7 +68,7 @@ export function Analytics() {
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    if (!selectedExamId) { setItemAnalysis([]); setItemAnalysisError(null); return; }
+    if (!selectedExamId) { setItemAnalysis([]); setItemAnalysisError(null); setMastery([]); setMasteryError(null); return; }
     let active = true;
     setItemAnalysisLoading(true); setItemAnalysisError(null);
     void supabase.rpc('get_exam_item_analysis', { exam_uuid: selectedExamId }).then(({ data, error: rpcError }) => {
@@ -72,6 +76,19 @@ export function Analytics() {
       if (rpcError) setItemAnalysisError(rpcError.message);
       setItemAnalysis((data as ItemAnalysis[]) ?? []);
       setItemAnalysisLoading(false);
+    });
+    return () => { active = false; };
+  }, [selectedExamId]);
+
+  useEffect(() => {
+    if (!selectedExamId) return;
+    let active = true;
+    setMasteryLoading(true); setMasteryError(null);
+    void supabase.rpc('get_learning_outcome_mastery', { p_exam_id: selectedExamId }).then(({ data, error: rpcError }) => {
+      if (!active) return;
+      if (rpcError) setMasteryError(rpcError.message);
+      setMastery((data as OutcomeMastery[]) ?? []);
+      setMasteryLoading(false);
     });
     return () => { active = false; };
   }, [selectedExamId]);
@@ -148,6 +165,16 @@ export function Analytics() {
       {itemAnalysisError && <p className="mt-4 text-sm text-danger-700">تعذر تحميل تحليل الأسئلة: {itemAnalysisError}</p>}
       {itemAnalysisLoading && <div className="flex justify-center py-6"><Loader2 size={22} className="animate-spin text-brand-600" /></div>}
       {selectedExamId && !itemAnalysisLoading && !itemAnalysisError && (itemAnalysis.length ? <div className="mt-4 space-y-2">{itemAnalysis.map((item) => <div key={item.question_id} className={`flex items-center gap-3 rounded-xl border p-3 ${item.is_difficult ? 'border-danger-200 bg-danger-50' : 'border-ink-100 bg-ink-50'}`}><span className="w-10 font-800 nums-latin">#{item.question_number}</span><span className="min-w-0 flex-1 truncate">{item.prompt}</span><span className={`text-sm font-700 nums-latin ${item.is_difficult ? 'text-danger-700' : 'text-ink-700'}`}>{item.success_rate === null ? 'لا توجد بيانات' : `${Number(item.success_rate).toFixed(1)}%`}</span>{item.is_difficult && <Badge tone="danger">سؤال صعب — يحتاج إعادة تدريس</Badge>}</div>)}</div> : <EmptyState title="لا توجد بيانات أسئلة نهائية" subtitle="ستظهر النتائج بعد تصحيح محاولات هذا الامتحان." />)}
+    </Card>
+    <Card className="p-5" data-testid="analytics-learning-outcomes">
+      <SectionHeader title="إتقان نواتج التعلم" subtitle="حساب موزون من المحاولات المنشورة والمعتمدة فقط؛ السؤال المرتبط بأكثر من ناتج لا يضاعف الدرجة." />
+      {masteryError && <p className="text-sm text-danger-700">تعذر تحميل إتقان النواتج: {masteryError}</p>}
+      {masteryLoading && <div className="flex justify-center py-6"><Loader2 size={22} className="animate-spin text-brand-600" /></div>}
+      {selectedExamId && !masteryLoading && !masteryError && (mastery.length ? <div className="grid gap-3 md:grid-cols-2">{mastery.map((outcome) => {
+        const value = outcome.mastery_percentage ?? 0;
+        const tone = outcome.classification === 'good' ? 'accent' : outcome.classification === 'needs_review' ? 'danger' : outcome.classification === 'developing' ? 'warning' : 'brand';
+        return <div key={outcome.learning_outcome_id} className="rounded-xl border border-ink-100 bg-ink-50 p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><Badge tone="brand">{outcome.code}</Badge><strong className="text-ink-900">{outcome.name_ar}</strong></div><p className="mt-2 text-xs text-ink-500">{outcome.question_count} أسئلة · {outcome.attempt_count} محاولات · {outcome.answered_count} إجابة محسوبة</p></div><Badge tone={tone}>{outcome.is_sufficient ? outcome.recommendation : 'بيانات غير كافية'}</Badge></div><div className="mt-3 flex items-center gap-3"><ProgressBar value={value} tone={tone} className="flex-1" /><strong className="nums-latin text-ink-800">{outcome.mastery_percentage === null ? '—' : `${Number(outcome.mastery_percentage).toFixed(1)}%`}</strong></div></div>;
+      })}</div> : <EmptyState title="لا توجد نواتج مرتبطة بهذا الامتحان" subtitle="اربط الأسئلة بنواتج تعلم من بنك الأسئلة، ثم انشر النتائج المعتمدة لظهور الحساب." />)}
     </Card>
   </div>;
 }

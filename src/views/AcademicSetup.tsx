@@ -5,14 +5,14 @@ import { supabase, useAuthSafe } from '../lib/auth-helpers';
 import type { UserRole } from '../lib/auth';
 import { useFeedback } from '../components/FeedbackProvider';
 
-type Tab = 'years' | 'stages' | 'grades' | 'classes' | 'subjects' | 'gradeSubjects' | 'teachers';
+type Tab = 'years' | 'stages' | 'grades' | 'classes' | 'sections' | 'subjects' | 'gradeSubjects' | 'teachers';
 
 type AcademicYear = { id: string; institution_id: string; name: string; start_date: string; end_date: string; is_current: boolean; is_active: boolean };
 type Stage = { id: string; institution_id: string; name: string; code: string | null; sort_order: number; is_active: boolean };
 type Grade = { id: string; institution_id: string; education_stage_id: string | null; name: string; code: string | null; sort_order: number; is_active: boolean };
 type Branch = { id: string; name: string; is_active: boolean };
 type ClassRow = { id: string; institution_id: string; branch_id: string | null; academic_year_id: string | null; grade_level_id: string | null; name: string; academic_year: string; is_active: boolean };
-type Section = { id: string; class_id: string; name: string; capacity: number | null; is_active: boolean };
+type Section = { id: string; institution_id: string; class_id: string; academic_year_id: string | null; grade_level_id: string | null; branch_id: string | null; name: string; code: string | null; capacity: number | null; is_active: boolean };
 type Subject = { id: string; institution_id: string; name: string; name_en: string | null; code: string | null; is_active: boolean };
 type Staff = { id: string; full_name: string; role: string; is_active: boolean };
 type GradeSubject = { id: string; institution_id: string; academic_year_id: string; grade_level_id: string; subject_id: string; class_id: string | null; is_required: boolean; is_active: boolean };
@@ -26,6 +26,7 @@ const tabs: { id: Tab; label: string }[] = [
   { id: 'subjects', label: 'المواد' },
   { id: 'gradeSubjects', label: 'توزيع المواد' },
   { id: 'teachers', label: 'توزيع المعلمين' },
+  { id: 'sections', label: '\u0627\u0644\u0634\u064f\u0639\u0628' },
 ];
 
 export function AcademicSetup() {
@@ -59,7 +60,7 @@ export function AcademicSetup() {
       supabase.from('grade_levels').select('id, institution_id, education_stage_id, name, code, sort_order, is_active').eq('institution_id', institutionId).order('sort_order'),
       supabase.from('branches').select('id, name, is_active').eq('institution_id', institutionId).order('name'),
       supabase.from('classes').select('id, institution_id, branch_id, academic_year_id, grade_level_id, name, academic_year, is_active').eq('institution_id', institutionId).order('name'),
-      supabase.from('sections').select('id, class_id, name, capacity, is_active').order('name'),
+      supabase.from('sections').select('id, institution_id, class_id, academic_year_id, grade_level_id, branch_id, name, code, capacity, is_active').eq('institution_id', institutionId).order('name'),
       supabase.from('subjects').select('id, institution_id, name, name_en, code, is_active').eq('institution_id', institutionId).order('name'),
       supabase.from('staff_profiles').select('id, full_name, role, is_active').eq('institution_id', institutionId).eq('role', 'teacher').order('full_name'),
       supabase.from('grade_subjects').select('*').eq('institution_id', institutionId),
@@ -147,6 +148,13 @@ export function AcademicSetup() {
           {tab === 'subjects' && <Grid empty="لم تنشأ مواد بعد." icon={<BookOpen size={40} />}>{subjects.filter((row) => match([row.name, row.code])).map((row) => <Item key={row.id} testId={`academic-item-subject-${row.id}`} title={row.name} meta={row.code ?? 'بدون كود'} active={row.is_active} onEdit={() => open('subjects', row as unknown as Record<string, unknown>)} onToggle={() => toggle('subjects', row.id, row.is_active)} />)}</Grid>}
           {tab === 'gradeSubjects' && <Grid empty="اربط المواد بالصفوف حتى يرثها الطلاب." icon={<BookOpen size={40} />}>{gradeSubjects.filter((row) => match([names.subject.get(row.subject_id), names.grade.get(row.grade_level_id), names.year.get(row.academic_year_id)])).map((row) => <Item key={row.id} testId={`academic-item-grade-subject-${row.id}`} title={names.subject.get(row.subject_id) ?? 'مادة'} meta={`${names.year.get(row.academic_year_id) ?? ''} · ${names.grade.get(row.grade_level_id) ?? ''} · ${row.class_id ? names.class.get(row.class_id) : 'كل فصول الصف'} · ${row.is_required ? 'إجبارية' : 'اختيارية'}`} active={row.is_active} onEdit={() => open('gradeSubjects', row as unknown as Record<string, unknown>)} onToggle={() => toggle('grade_subjects', row.id, row.is_active)} />)}</Grid>}
           {tab === 'teachers' && <Grid empty="اربط المعلمين بالمواد والفصول." icon={<UserCheck size={40} />}>{subjectTeachers.filter((row) => match([names.teacher.get(row.teacher_id), names.subject.get(row.subject_id), names.class.get(row.class_id)])).map((row) => <Item key={row.id} testId={`academic-item-teacher-${row.id}`} title={names.teacher.get(row.teacher_id) ?? 'معلم'} meta={`${names.subject.get(row.subject_id) ?? ''} · ${names.class.get(row.class_id) ?? ''} · ${row.section_id ? names.section.get(row.section_id) : 'كل الشعب'}`} active={row.is_active} onEdit={() => open('teachers', row as unknown as Record<string, unknown>)} onToggle={() => toggle('subject_teachers', row.id, row.is_active)} />)}</Grid>}
+          {tab === 'sections' && <Grid empty="No sections have been created yet." icon={<Layers3 size={40} />}>
+            {sections.filter((row) => match([row.name, row.code, names.class.get(row.class_id)])).map((row) => {
+              const parent = classes.find((item) => item.id === row.class_id);
+              const scope = [parent?.name, names.grade.get(row.grade_level_id ?? parent?.grade_level_id ?? ''), names.year.get(row.academic_year_id ?? parent?.academic_year_id ?? ''), names.branch.get(row.branch_id ?? parent?.branch_id ?? '')].filter(Boolean).join(' · ');
+              return <Item key={row.id} testId={`academic-item-section-${row.id}`} title={row.name} meta={`${row.code ? `${row.code} · ` : ''}${scope}`} active={row.is_active} onEdit={() => open('sections', row as unknown as Record<string, unknown>)} onToggle={() => toggle('sections', row.id, row.is_active)} />;
+            })}
+          </Grid>}
         </>
       ))}
 
@@ -188,6 +196,7 @@ function AcademicEditor({ kind, row, institutionId, years, stages, grades, branc
     branch_id: String(row?.branch_id ?? ''),
     class_id: String(row?.class_id ?? ''),
     section_id: String(row?.section_id ?? ''),
+    capacity: String(row?.capacity ?? 30),
     subject_id: String(row?.subject_id ?? ''),
     teacher_id: String(row?.teacher_id ?? ''),
     is_required: Boolean(row?.is_required ?? true),
@@ -233,6 +242,22 @@ function AcademicEditor({ kind, row, institutionId, years, stages, grades, branc
       if (!values.name || !values.academic_year_id || !values.grade_level_id) return fail('اسم الفصل والعام والصف مطلوبة.');
       table = 'classes';
       payload = { institution_id: institutionId, name: values.name, branch_id: values.branch_id || null, academic_year_id: values.academic_year_id, academic_year: years.find((year) => year.id === values.academic_year_id)?.name ?? 'غير محدد', grade_level_id: values.grade_level_id, is_active: values.is_active };
+    } else if (kind === 'sections') {
+      if (!values.name || !values.class_id) return fail('اسم الشعبة والفصل الأب مطلوبان.');
+      const parent = classes.find((item) => item.id === values.class_id);
+      if (!parent) return fail('لا يمكن إنشاء شعبة بدون فصل أب صالح.');
+      table = 'sections';
+      payload = {
+        institution_id: institutionId,
+        class_id: parent.id,
+        academic_year_id: parent.academic_year_id,
+        grade_level_id: parent.grade_level_id,
+        branch_id: parent.branch_id,
+        name: String(values.name).trim(),
+        code: String(values.code).trim() || null,
+        capacity: Number(values.capacity || 30),
+        is_active: values.is_active,
+      };
     } else if (kind === 'subjects') {
       if (!values.name || !values.code) return fail('اسم المادة والكود مطلوبان.');
       table = 'subjects';
@@ -278,6 +303,12 @@ function AcademicEditor({ kind, row, institutionId, years, stages, grades, branc
         <button onClick={onClose} className="btn-outline !min-h-10 !px-4 !py-2.5 !text-sm"><ArrowRight size={17} /> رجوع للقائمة</button>
       </div>
       <div className="p-6 md:p-8 space-y-5">
+          {kind === 'sections' && <>
+            <Field testId="academic-section-name" label="اسم الشعبة" value={String(values.name)} onChange={(value) => set('name', value)} />
+            <Field testId="academic-section-code" label="كود الشعبة (اختياري)" value={String(values.code)} onChange={(value) => set('code', value)} dir="ltr" />
+            <Select testId="academic-select-parent-class" label="الفصل الأب" value={String(values.class_id)} onChange={(value) => set('class_id', value)} options={classes.filter((item) => item.is_active || item.id === values.class_id).map((item) => [item.id, `${item.name} - ${item.academic_year}`])} />
+            <Field testId="academic-section-capacity" label="السعة" type="number" value={String(values.capacity ?? 30)} onChange={(value) => set('capacity', value)} />
+          </>}
           {localError && <StateMessage tone="error" message={localError} />}
           {['years', 'stages', 'grades', 'classes', 'subjects'].includes(kind) && <Field testId="academic-field-name" label="الاسم" value={String(values.name)} onChange={(value) => set('name', value)} />}
           {['stages', 'grades', 'subjects'].includes(kind) && <Field testId="academic-field-code" label="الكود" value={String(values.code)} onChange={(value) => set('code', value)} dir="ltr" />}

@@ -141,7 +141,7 @@ export async function signUp(params: {
 }
 
 export async function signOut() {
-  return supabase.auth.signOut();
+  return supabase.auth.signOut({ scope: 'local' });
 }
 
 export async function getSession(): Promise<Session | null> {

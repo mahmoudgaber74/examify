@@ -32,9 +32,10 @@ interface StudentRow {
 }
 
 interface ClassRow { id: string; institution_id: string; name: string; grade_level_id: string | null; branch_id: string | null; academic_year: string; academic_year_id?: string | null; is_active: boolean; }
+interface AcademicYearRow { id: string; institution_id: string; name: string; is_active: boolean; is_current?: boolean; }
 interface GradeLevelRow { id: string; institution_id: string; name: string; name_en: string | null; education_stage_id?: string | null; sort_order: number; is_active: boolean; }
 interface BranchRow { id: string; institution_id: string; name: string; address: string | null; phone: string | null; is_active: boolean; }
-interface SectionRow { id: string; name: string; class_id: string; capacity: number | null; is_active: boolean; }
+interface SectionRow { id: string; institution_id?: string; name: string; code?: string | null; class_id: string; academic_year_id?: string | null; grade_level_id?: string | null; branch_id?: string | null; capacity: number | null; is_active: boolean; }
 interface SubjectRow {
   id: string;
   institution_id: string;
@@ -85,6 +86,7 @@ interface StudentFormValues {
   birthDate: string;
   email: string;
   phone: string;
+  academicYearId: string;
   branchId: string;
   gradeLevelId: string;
   classId: string;
@@ -109,6 +111,7 @@ const emptyStudentForm: StudentFormValues = {
   birthDate: '',
   email: '',
   phone: '',
+  academicYearId: '',
   branchId: '',
   gradeLevelId: '',
   classId: '',
@@ -136,6 +139,7 @@ export function SIS() {
   const [tab, setTab] = useState<Tab>('students');
   const [students, setStudents] = useState<StudentRow[]>([]);
   const [classes, setClasses] = useState<ClassRow[]>([]);
+  const [academicYears, setAcademicYears] = useState<AcademicYearRow[]>([]);
   const [gradeLevels, setGradeLevels] = useState<GradeLevelRow[]>([]);
   const [branches, setBranches] = useState<BranchRow[]>([]);
   const [sections, setSections] = useState<SectionRow[]>([]);
@@ -146,13 +150,15 @@ export function SIS() {
 
   const loadMeta = useCallback(async () => {
     if (!institutionId) return;
-    const [branchRes, gradeRes, classRes, sectionRes, subjectRes] = await Promise.all([
+    const [yearRes, branchRes, gradeRes, classRes, sectionRes, subjectRes] = await Promise.all([
+      supabase.from('academic_years').select('id, institution_id, name, is_active, is_current').eq('institution_id', institutionId).order('name', { ascending: false }),
       supabase.from('branches').select('id, institution_id, name, address, phone, is_active').eq('institution_id', institutionId).order('name'),
       supabase.from('grade_levels').select('id, institution_id, education_stage_id, name, name_en, sort_order, is_active').eq('institution_id', institutionId).order('sort_order'),
       supabase.from('classes').select('id, institution_id, name, grade_level_id, branch_id, academic_year, academic_year_id, is_active').eq('institution_id', institutionId).order('name'),
-      supabase.from('sections').select('id, name, class_id, capacity, is_active').order('name'),
+      supabase.from('sections').select('id, institution_id, name, code, class_id, academic_year_id, grade_level_id, branch_id, capacity, is_active').eq('institution_id', institutionId).order('name'),
       supabase.from('subjects').select('id, institution_id, name, name_en, code, is_active, created_at').eq('institution_id', institutionId).order('name'),
     ]);
+    setAcademicYears((yearRes.data as AcademicYearRow[]) ?? []);
     setBranches((branchRes.data as BranchRow[]) ?? []);
     setGradeLevels(((gradeRes.data as Omit<GradeLevelRow, 'is_active'>[] | null) ?? []).map((row) => ({ ...row, is_active: true })));
     setClasses((classRes.data as ClassRow[]) ?? []);
@@ -171,7 +177,7 @@ export function SIS() {
         .select(STUDENT_PROFILE_BASE_SELECT)
         .eq('institution_id', institutionId)
         .order('full_name'),
-      supabase.from('class_students').select('id, class_id, section_id, student_id, academic_year_id, grade_level_id, status, seat_number').eq('status', 'active'),
+      supabase.from('class_students').select('id, institution_id, class_id, section_id, student_id, academic_year_id, grade_level_id, status, seat_number').eq('institution_id', institutionId).eq('status', 'active'),
     ]);
 
     const studentRows = studentRes.data as StudentProfileQueryRow[] | null;
@@ -228,6 +234,7 @@ export function SIS() {
           institutionId={institutionId ?? ''}
           actorId={user?.id ?? null}
           role={role}
+          academicYears={academicYears}
           students={students}
           classStudents={classStudents}
           classes={classes}
@@ -855,6 +862,7 @@ function StudentsTab({
   institutionId,
   actorId,
   role,
+  academicYears,
   students,
   classStudents,
   classes,
@@ -868,6 +876,7 @@ function StudentsTab({
   institutionId: string;
   actorId: string | null;
   role: UserRole;
+  academicYears: AcademicYearRow[];
   students: StudentRow[];
   classStudents: ClassStudentRow[];
   classes: ClassRow[];
@@ -1036,6 +1045,7 @@ function StudentsTab({
         institutionId={institutionId}
         actorId={actorId}
         role={role}
+        academicYears={academicYears}
         existingStudents={students}
         classes={classes}
         gradeLevels={gradeLevels}
@@ -1215,6 +1225,7 @@ function StudentFormPage({
   institutionId,
   actorId,
   role,
+  academicYears,
   existingStudents,
   classes,
   gradeLevels,
@@ -1229,6 +1240,7 @@ function StudentFormPage({
   institutionId: string;
   actorId: string | null;
   role: UserRole;
+  academicYears: AcademicYearRow[];
   existingStudents: StudentRow[];
   classes: ClassRow[];
   gradeLevels: GradeLevelRow[];
@@ -1247,10 +1259,17 @@ function StudentFormPage({
   const visibleGrades = gradeLevels.filter((grade) => grade.is_active || grade.id === values.gradeLevelId);
   const visibleClasses = classes.filter((classRow) => (
     (classRow.is_active || classRow.id === values.classId)
+    && (!values.academicYearId || classRow.academic_year_id === values.academicYearId)
     && (!values.branchId || classRow.branch_id === values.branchId)
     && (!values.gradeLevelId || classRow.grade_level_id === values.gradeLevelId)
   ));
-  const visibleSections = values.classId ? sections.filter((section) => section.class_id === values.classId && (section.is_active || section.id === values.sectionId)) : [];
+  const visibleSections = values.classId ? sections.filter((section) => (
+    section.class_id === values.classId
+    && (section.is_active || section.id === values.sectionId)
+    && (!values.academicYearId || !section.academic_year_id || section.academic_year_id === values.academicYearId)
+    && (!values.gradeLevelId || !section.grade_level_id || section.grade_level_id === values.gradeLevelId)
+    && (!values.branchId || !section.branch_id || section.branch_id === values.branchId)
+  )) : [];
 
   function update<K extends keyof StudentFormValues>(key: K, value: StudentFormValues[K]) {
     setValues((prev) => {
@@ -1263,6 +1282,10 @@ function StudentFormPage({
         next.classId = '';
         next.sectionId = '';
       }
+      if (key === 'academicYearId') {
+        next.classId = '';
+        next.sectionId = '';
+      }
       if (key === 'gradeLevelId') {
         next.classId = '';
         next.sectionId = '';
@@ -1272,6 +1295,7 @@ function StudentFormPage({
         next.sectionId = '';
         next.branchId = selectedClass?.branch_id ?? next.branchId;
         next.gradeLevelId = selectedClass?.grade_level_id ?? next.gradeLevelId;
+        next.academicYearId = selectedClass?.academic_year_id ?? next.academicYearId;
       }
       return next;
     });
@@ -1281,6 +1305,10 @@ function StudentFormPage({
     const result = validateStudent(values, existingStudents, student?.id);
     setErrors(result.errors);
     if (!result.valid) return;
+    if (values.classId && visibleSections.length > 0 && !values.sectionId) {
+      setErrors({ ...result.errors, sectionId: 'اختر الشعبة قبل حفظ تسجيل الطالب.' });
+      return;
+    }
 
     setSaving(true);
     const saveResult = await saveStudentRecord({
@@ -1323,6 +1351,10 @@ function StudentFormPage({
 
       <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1fr)_18rem]">
         <div className="min-w-0 space-y-5">
+          <div className="card p-5 sm:p-6">
+            <SelectField testId="student-academic-year" label="العام الدراسي" value={values.academicYearId} onChange={(value) => update('academicYearId', value)} disabled={readonly} options={[['', 'غير محدد'], ...academicYears.filter((year) => year.is_active || year.id === values.academicYearId).map((year) => [year.id, year.name] as [string, string])]} />
+            {values.classId && visibleSections.length === 0 && <p className="mt-3 rounded-xl border border-warning-200 bg-warning-50 p-3 text-sm text-warning-800">لا توجد شُعب نشطة لهذا الفصل. أضف شعبة من الإعداد الأكاديمي ثم ارجع لاختيارها.</p>}
+          </div>
           {errors.form && <FormError message={errors.form} />}
 
           <FormSection title="البيانات الأساسية">
@@ -1541,6 +1573,7 @@ function studentToForm(student: StudentRow, classLink: ClassStudentRow | null, c
     birthDate: student.birth_date ?? '',
     email: student.email ?? '',
     phone: student.phone ?? '',
+    academicYearId: classLink?.academic_year_id ?? classRow?.academic_year_id ?? '',
     branchId: classRow?.branch_id ?? '',
     gradeLevelId: student.grade_level_id ?? '',
     classId: classLink?.class_id ?? '',
@@ -1564,6 +1597,7 @@ function isMissingStudentProfileColumnError(message: string) {
 
 function validateStudent(values: StudentFormValues, existingStudents: StudentRow[], currentId?: string): { valid: boolean; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
+  if (values.sectionId && !values.classId) errors.sectionId = 'لا يمكن اختيار شعبة بدون فصل أب.';
   const fullName = values.fullName.trim() || [values.firstName, values.fatherName, values.familyName].filter(Boolean).join(' ').trim();
   if (!fullName) errors.fullName = 'اسم الطالب مطلوب.';
   if (values.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(values.email)) errors.email = 'أدخل بريدًا إلكترونيًا صحيحًا.';
@@ -1631,9 +1665,12 @@ async function saveStudentRecord({
 
   if (values.classId) {
     const classRes = await supabase.from('class_students').insert({
+      institution_id: institutionId,
       class_id: values.classId,
       section_id: values.sectionId || null,
       student_id: savedStudentId,
+      academic_year_id: values.academicYearId || null,
+      grade_level_id: values.gradeLevelId || null,
       seat_number: values.seatNumber.trim() || null,
       status: 'active',
     });
